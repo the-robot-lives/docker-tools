@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+# =============================================================================
+# docker-build — Centralized Docker build for Docker services
+#
+# Usage:
+#   docker-build                         # auto-detect repo from CWD
+#   docker-build my-frontend             # explicit target
+#   docker-build my-backend --push       # build then push
+#   docker-build --silent                # suppress push prompt
+#   docker-build my-frontend --push      # explicit target + auto-push
+#   docker-build --all                   # build all repos in parallel
+#   docker-build --all --push            # build all + push each
+#   docker-build --pick                  # interactive selection, parallel build
+#   docker-build --pick --push           # pick + push
+#   docker-build my-frontend --push --release  # build, push, update helm tag
+#   docker-build --include my-backend,my-frontend --stage  # specific targets
+#   docker-build --dev                   # dev build (next dev server, no prod optimization)
+#   docker-build --no-buildx              # plain docker build (amd64 only, no persistent cache)
+#   docker-build --no-cache              # build without Docker layer cache
+#   docker-build --no-zellij             # multi-build without zellij (background jobs + logs)
+#   BUILD_ENV=prod docker-build          # production build
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INFRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/../k8-lib/docker-config.sh"
+
+# --- Log directory -----------------------------------------------------------
+LOG_DIR="${INFRA_ROOT}/.tmp/docker-build-logs"
+mkdir -p "$LOG_DIR"
+
+# --- Parse flags -------------------------------------------------------------
+SILENT=false
+AUTO_PUSH=false
+BUILD_ALL=false
+BUILD_PICK=false
+DEV_BUILD=false
+USE_BUILDX=true
+NO_CACHE=false
+NO_ZELLIJ=false
+INCLUDE_LIST=""
+TARGET=""
+PUSH_PASSTHROUGH=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --silent)  SILENT=true ;;
+    --push)    AUTO_PUSH=true ;;
+    --dry-run) PUSH_PASSTHROUGH+=(--dry-run) ;;
+    -up)       PUSH_PASSTHROUGH+=(-up) ;;
+    --verbose) PUSH_PASSTHROUGH+=(--verbose) ;;
+    --yes|-y)  AUTO_YES=true; PUSH_PASSTHROUGH+=(-y) ;;
+    --all)     BUILD_ALL=true ;;
+    --pick)    BUILD_PICK=true ;;
+    --dev)     DEV_BUILD=true ;;
+    --stage)   export BUILD_ENV=stage ;;
+    --prod)    export BUILD_ENV=prod ;;
+    --env=*)   export BUILD_ENV="${1#--env=}" ;;
+    --no-buildx) USE_BUILDX=false ;;
+    --no-cache)  NO_CACHE=true ;;
+    --no-zellij) NO_ZELLIJ=true ;;
+    --release) PUSH_PASSTHROUGH+=(--release) ;;
+    --include=*) INCLUDE_LIST="${1#--include=}" ;;
+    --include)   INCLUDE_LIST="$2"; shift ;;
+    -*)          ;; # ignore other flags
+    *)
+      if [[ -z "$TARGET" ]]; then
+        if resolved=$(normalize_repo_name "$1"); then
+          TARGET="$resolved"
+        else
+          echo "⚠️  Unknown target: $1"
+          echo "   Known repos: ${DOCKER_REPOS[*]}"
+          exit 1
+        fi
+      fi
+      ;;
+  esac
+  shift
+done
+
+# --- Validate flag combinations -----------------------------------------------
+BUILD_INCLUDE=false
+if [[ -n "$INCLUDE_LIST" ]]; then
+  BUILD_INCLUDE=true
+fi
+
+_multi_count=0
+$BUILD_ALL && ((_multi_count++)) || true
+$BUILD_PICK && ((_multi_count++)) || true
+$BUILD_INCLUDE && ((_multi_count++)) || true
+if (( _multi_count > 1 )); then
+  echo "❌  --all, --pick, and --include are mutually exclusive"
+  exit 1
+fi
+
+if [[ -n "$TARGET" ]] && ($BUILD_ALL || $BUILD_PICK || $BUILD_INCLUDE); then
+  echo "❌  Cannot specify a target with --all, --pick, or --include"
+  exit 1
+fi
+
+# =============================================================================
+# _build_single — Core build logic for one image
+#   Runs in its own subshell for parallel safety. All output goes to stdout/err
+#   (caller redirects to log file when running in parallel).
+#   Sets globals: _BUILT_SHA, _BUILT_VSN (only useful in single-build mode)
+# =============================================================================
+_build_single() {
+  local image="$1"
+  local repo_dir
+  repo_dir="$(get_repo_dir "$image")"
+
+  if [[ ! -d "$repo_dir" ]]; then
+    echo "❌  Repo directory not found: $repo_dir"
+    return 1
+  fi
+
+  cd "$repo_dir"
+
+  # --- Version setup ---
+  local vsn_major=${VSN_MAJOR:-1}
+  local vsn_minor=${VSN_MINOR:-0}
+  local vsn_sub=${VSN_SUB:-edge}
+  local build_env=${BUILD_ENV:-dev}
+
+  local git_sha timestamp build_vsn
+  git_sha=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  timestamp=$(date +%Y%m%d-%H%M%S)
+
+  if [[ "$build_env" == "prod" || "$build_env" == "production" ]]; then
+    build_vsn="${BUILD_VSN:-v${vsn_major}.${vsn_minor}.${vsn_sub}}"
+  else
+    build_vsn="${BUILD_VSN:-v${vsn_major}.${vsn_minor}.${vsn_sub}-${build_env}}"
+  fi
+
+  local tags=(
+    "${REGISTRY}/${image}:latest"
+    "${REGISTRY}/${image}:${git_sha}"
+    "${REGISTRY}/${image}:${timestamp}-${git_sha}"
+    "${REGISTRY}/${image}:${build_vsn}"
+  )
+
+  # --- Per-repo build args ---
+  local build_args=()
+
+  # Per-repo build args — override _build_args_for_image in docker-config.sh
+  if declare -f _build_args_for_image &>/dev/null; then
+    _build_args_for_image "$image" "$build_env" build_args
+  fi
+
+  # --- Build ---
+  echo "Building ${image}..."
+  local tag_args=()
+  for tag in "${tags[@]}"; do
+    tag_args+=(-t "$tag")
+  done
+
+  # Use custom Dockerfile if the image has one
+  local dockerfile_flag=()
+  local custom_df
+  custom_df="$(_dockerfile_for_image "$image")"
+  if [[ -n "$custom_df" ]]; then
+    dockerfile_flag=(-f "$custom_df")
+    echo "  Using Dockerfile: ${custom_df}"
+  fi
+
+  # --- Target stage (dev vs production) ---
+  local target_flag=()
+  if _is_single_stage "$image"; then
+    : # single-stage Dockerfile, no --target needed
+  elif $DEV_BUILD; then
+    target_flag=(--target dev)
+    echo "  Dev build: targeting dev stage (next dev server)"
+  else
+    target_flag=(--target production)
+  fi
+
+  # --- No-cache flag ---
+  local nocache_flag=()
+  if $NO_CACHE; then
+    nocache_flag=(--no-cache)
+    echo "  No-cache: forcing full rebuild"
+  fi
+
+  # --- Assemble common flags ---
+  local common_flags=(
+    "${nocache_flag[@]+"${nocache_flag[@]}"}"
+    "${target_flag[@]}"
+    "${dockerfile_flag[@]+"${dockerfile_flag[@]}"}"
+    "${build_args[@]+"${build_args[@]}"}"
+    "${tag_args[@]}"
+  )
+
+  export DOCKER_BUILDKIT=1
+
+  if $USE_BUILDX; then
+    # buildx (default): multi-platform with persistent local cache
+    local cache_dir="${INFRA_ROOT}/.tmp/buildx-cache/${image}"
+    mkdir -p "$cache_dir"
+    local cache_flags=(
+      --cache-from "type=local,src=${cache_dir}"
+      --cache-to   "type=local,dest=${cache_dir},mode=max"
+    )
+    if $NO_CACHE; then
+      cache_flags=(--cache-to "type=local,dest=${cache_dir},mode=max")
+    fi
+    docker buildx build \
+      --platform linux/amd64,linux/arm64 \
+      "${cache_flags[@]}" \
+      "${common_flags[@]}" \
+      --load .
+  else
+    # --no-buildx: plain docker build, amd64 only, uses BuildKit layer cache
+    docker build --platform linux/amd64 \
+      "${common_flags[@]}" .
+  fi
+
+  echo ""
+  echo "Built and tagged:"
+  printf '  %s\n' "${tags[@]}"
+  echo ""
+
+  # --- Record build state ---
+  save_build_state "$image" "$git_sha" "$build_vsn"
+
+  # Expose to caller (single-build mode only — subshells won't propagate)
+  _BUILT_SHA="$git_sha"
+  _BUILT_VSN="$build_vsn"
+
+  return 0
+}
+
+# =============================================================================
+# MULTI-BUILD MODE (--all, --pick, or --include)
+# =============================================================================
+if $BUILD_ALL || $BUILD_PICK || $BUILD_INCLUDE; then
+  TARGETS=()
+
+  if $BUILD_INCLUDE; then
+    IFS=',' read -ra _inc_items <<< "$INCLUDE_LIST"
+    for item in "${_inc_items[@]}"; do
+      item="${item## }"; item="${item%% }"
+      if resolved=$(normalize_repo_name "$item"); then
+        TARGETS+=("$resolved")
+      else
+        echo "⚠️  Unknown target in --include: $item"
+        echo "   Known repos: ${DOCKER_REPOS[*]}"
+        exit 1
+      fi
+    done
+    echo "Building: ${TARGETS[*]}"
+  elif $BUILD_ALL; then
+    TARGETS=("${DOCKER_REPOS[@]}")
+    echo "Building all repos: ${TARGETS[*]}"
+  else
+    # --- Interactive pick (toggle list) ---
+    SELECTED=()
+    for _repo in "${DOCKER_REPOS[@]}"; do
+      SELECTED+=(false)
+    done
+
+    echo "Select repos to build:"
+    for i in "${!DOCKER_REPOS[@]}"; do
+      echo "  [ ] $((i+1))) ${DOCKER_REPOS[$i]}"
+    done
+    echo ""
+    echo "Toggle by number, 'a' = all, 'n' = none, Enter = go, 'q' = quit"
+
+    while true; do
+      read -r -p "> " input
+      [[ "$input" == "q" ]] && { echo "Aborted."; exit 0; }
+      [[ -z "$input" ]] && break
+
+      if [[ "$input" == "a" ]]; then
+        for i in "${!SELECTED[@]}"; do SELECTED[$i]=true; done
+      elif [[ "$input" == "n" ]]; then
+        for i in "${!SELECTED[@]}"; do SELECTED[$i]=false; done
+      elif [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input <= ${#DOCKER_REPOS[@]} )); then
+        ti=$((input - 1))
+        if [[ "${SELECTED[$ti]}" == "true" ]]; then
+          SELECTED[$ti]=false
+        else
+          SELECTED[$ti]=true
+        fi
+      fi
+
+      # Redisplay
+      for i in "${!DOCKER_REPOS[@]}"; do
+        mark="[ ]"
+        [[ "${SELECTED[$i]}" == "true" ]] && mark="[x]"
+        echo "  ${mark} $((i+1))) ${DOCKER_REPOS[$i]}"
+      done
+    done
+
+    for i in "${!DOCKER_REPOS[@]}"; do
+      if [[ "${SELECTED[$i]}" == "true" ]]; then
+        TARGETS+=("${DOCKER_REPOS[$i]}")
+      fi
+    done
+
+    if (( ${#TARGETS[@]} == 0 )); then
+      echo "No repos selected."
+      exit 0
+    fi
+
+    echo ""
+    echo "Building: ${TARGETS[*]}"
+  fi
+
+  # --- Build passthrough flags for zellij panes ------------------------------
+  PANE_FLAGS=""
+  $AUTO_PUSH && PANE_FLAGS+=" --push"
+  $SILENT && PANE_FLAGS+=" --silent"
+  $DEV_BUILD && PANE_FLAGS+=" --dev"
+  $NO_CACHE && PANE_FLAGS+=" --no-cache"
+  ! $USE_BUILDX && PANE_FLAGS+=" --no-buildx"
+  [[ -n "${BUILD_ENV:-}" ]] && PANE_FLAGS+=" --env=${BUILD_ENV}"
+  for pt in "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"; do
+    PANE_FLAGS+=" ${pt}"
+  done
+
+  # --- Zellij multi-build mode ------------------------------------------------
+  if command -v zellij &>/dev/null && ! $NO_ZELLIJ; then
+    SESSION_NAME="build-$(date +%H%M%S)"
+    layout_file="$(mktemp /tmp/docker-build-zj-XXXXXX.kdl)"
+
+    {
+      echo "layout {"
+      echo "  tab name=\"builds\" {"
+      for image in "${TARGETS[@]}"; do
+        echo "    pane name=\"${image}\" {"
+        echo "      command \"bash\""
+        echo "      args \"-c\" \"docker-build ${image}${PANE_FLAGS}; exec bash\""
+        echo "    }"
+      done
+      echo "  }"
+      echo "}"
+    } > "$layout_file"
+
+    echo ""
+    echo "Launching zellij session '${SESSION_NAME}' with ${#TARGETS[@]} pane(s)..."
+
+    unset ZELLIJ ZELLIJ_SESSION_NAME
+    zellij -s "$SESSION_NAME" -n "$layout_file"
+    rm -f "$layout_file"
+    exit 0
+  fi
+
+  # --- Fallback: parallel builds (no zellij) ----------------------------------
+  RUN_TS=$(date +%Y%m%d-%H%M%S)
+  PIDS=()
+  LOG_FILES=()
+
+  echo ""
+  for image in "${TARGETS[@]}"; do
+    log_file="${LOG_DIR}/${image}-${RUN_TS}.log"
+    LOG_FILES+=("$log_file")
+    echo "  Starting ${image} → ${log_file}"
+
+    # Run each build in a subshell, output to log file
+    ( _build_single "$image" ) > "$log_file" 2>&1 &
+    PIDS+=($!)
+  done
+
+  echo ""
+  echo "Waiting for ${#PIDS[@]} parallel build(s)..."
+  echo ""
+
+  # --- Wait and collect results ----------------------------------------------
+  RESULTS=()
+  for i in "${!PIDS[@]}"; do
+    if wait "${PIDS[$i]}"; then
+      RESULTS+=("ok")
+    else
+      RESULTS+=("fail")
+    fi
+  done
+
+  # --- Summary ---------------------------------------------------------------
+  FAILED=()
+  SUCCEEDED=()
+
+  echo "========================================"
+  echo "  Build Summary"
+  echo "========================================"
+  for i in "${!TARGETS[@]}"; do
+    image="${TARGETS[$i]}"
+    log="${LOG_FILES[$i]}"
+    if [[ "${RESULTS[$i]}" == "ok" ]]; then
+      echo "  ✅  ${image}  →  ${log##*/}"
+      SUCCEEDED+=("$image")
+    else
+      echo "  ❌  ${image}  →  ${log##*/}"
+      FAILED+=("$image")
+    fi
+  done
+  echo "========================================"
+  echo "  ${#SUCCEEDED[@]} succeeded, ${#FAILED[@]} failed"
+  echo "  Logs: ${LOG_DIR}/"
+  echo "========================================"
+
+  # --- Push phase (sequential — Infisical auth is interactive) ---------------
+  if (( ${#SUCCEEDED[@]} > 0 )); then
+    if $AUTO_PUSH; then
+      echo ""
+      for image in "${SUCCEEDED[@]}"; do
+        echo "--- Pushing ${image} ---"
+        "$SCRIPT_DIR/docker-push" "$image" "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
+      done
+    elif ! $SILENT; then
+      echo ""
+      if _confirm "Push ${#SUCCEEDED[@]} successful build(s)?"; then
+        for image in "${SUCCEEDED[@]}"; do
+          echo "--- Pushing ${image} ---"
+          "$SCRIPT_DIR/docker-push" "$image" "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
+        done
+      else
+        echo "To push later:  utils/docker-push <image>"
+      fi
+    fi
+  fi
+
+  (( ${#FAILED[@]} > 0 )) && exit 1
+  exit 0
+fi
+
+# =============================================================================
+# SINGLE-BUILD MODE (original behavior)
+# =============================================================================
+ORIGINAL_DIR="$(pwd)"
+
+if [[ -n "$TARGET" ]]; then
+  IMAGE="$TARGET"
+elif detect_docker_repo "$ORIGINAL_DIR"; then
+  IMAGE="$DETECTED_REPO"
+else
+  echo "Not in a known docker repo directory."
+  echo ""
+  echo "Available targets:"
+  for i in "${!DOCKER_REPOS[@]}"; do
+    echo "  $((i+1))) ${DOCKER_REPOS[$i]}"
+  done
+  echo ""
+  read -r -p "Which repo to build? [1-${#DOCKER_REPOS[@]}] " choice
+  if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#DOCKER_REPOS[@]} )); then
+    echo "Invalid selection."
+    exit 1
+  fi
+  IMAGE="${DOCKER_REPOS[$((choice-1))]}"
+fi
+
+_build_single "$IMAGE"
+
+# Return to original directory
+cd "$ORIGINAL_DIR"
+
+# Export so docker-push can pick these up in the same invocation
+export LAST_BUILD_IMAGE="$IMAGE"
+export LAST_BUILD_SHA="$_BUILT_SHA"
+export LAST_BUILD_VSN="$_BUILT_VSN"
+
+# --- Push prompt -------------------------------------------------------------
+if $AUTO_PUSH; then
+  "$SCRIPT_DIR/docker-push" "$IMAGE" "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
+elif ! $SILENT; then
+  if _confirm "Push ${IMAGE}?"; then
+    "$SCRIPT_DIR/docker-push" "$IMAGE" "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
+  else
+    echo "To push later:  utils/docker-push ${IMAGE}"
+  fi
+fi
