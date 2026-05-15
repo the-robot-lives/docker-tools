@@ -19,9 +19,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INFRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+K8_LIB_DIR="${K8_LIB_DIR:-$(cd "$SCRIPT_DIR/../../k8-lib" 2>/dev/null && pwd || echo "${HOME}/.local/share/k8-lib")}"
+INFRA_ROOT="${INFRA_ROOT:-$(pwd)}"
 
-source "$SCRIPT_DIR/../k8-lib/docker-config.sh"
+source "$K8_LIB_DIR/bin/docker-config.sh"
 
 # --- Toggle-list helper ------------------------------------------------------
 # Usage: _toggle_input SELECTED_ARRAY_NAME MAX_COUNT
@@ -363,10 +364,10 @@ fi
 cd "$REPO_DIR"
 
 # --- Source shared version resolver -------------------------------------------
-if [[ -f "$SCRIPT_DIR/../k8-lib/docker-vsn.sh" ]]; then
-  source "$SCRIPT_DIR/../k8-lib/docker-vsn.sh"
+if [[ -f "$K8_LIB_DIR/bin/docker-vsn.sh" ]]; then
+  source "$K8_LIB_DIR/bin/docker-vsn.sh"
 else
-  echo "❌  Cannot find k8-lib/docker-vsn.sh"
+  echo "❌  Cannot find k8-lib/bin/docker-vsn.sh"
   exit 1
 fi
 
