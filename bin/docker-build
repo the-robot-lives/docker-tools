@@ -310,6 +310,12 @@ if $BUILD_ALL || $BUILD_PICK || $BUILD_INCLUDE; then
     echo "Building: ${TARGETS[*]}"
   fi
 
+  # --- Single target in multi-build mode: run directly -------------------------
+  if (( ${#TARGETS[@]} == 1 )); then
+    TARGET="${TARGETS[0]}"
+    # Fall through to single-build mode below
+  else
+
   # --- Build passthrough flags for zellij panes ------------------------------
   PANE_FLAGS=""
   $AUTO_PUSH && PANE_FLAGS+=" --push"
@@ -425,6 +431,8 @@ if $BUILD_ALL || $BUILD_PICK || $BUILD_INCLUDE; then
 
   (( ${#FAILED[@]} > 0 )) && exit 1
   exit 0
+
+  fi # close single-target else
 fi
 
 # =============================================================================
