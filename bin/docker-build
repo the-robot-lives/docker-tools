@@ -323,7 +323,7 @@ if $BUILD_ALL || $BUILD_PICK || $BUILD_INCLUDE; then
   done
 
   # --- Zellij multi-build mode ------------------------------------------------
-  if command -v zellij &>/dev/null && ! $NO_ZELLIJ; then
+  if command -v zellij &>/dev/null && ! $NO_ZELLIJ && (( ${#TARGETS[@]} > 1 )); then
     SESSION_NAME="build-$(date +%H%M%S)"
     layout_file="$(mktemp /tmp/docker-build-zj-XXXXXX.kdl)"
 
