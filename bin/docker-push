@@ -77,6 +77,7 @@ _toggle_input() {
 DRY_RUN=false
 FORCE_UP=false
 VERBOSE=false
+REMOTE_MODE=false
 PUSH_ALL=false
 PUSH_PICK=false
 NO_ZELLIJ=false
@@ -91,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=true ;;
     -up)       FORCE_UP=true ;;
     --verbose) VERBOSE=true ;;
+    --remote)  REMOTE_MODE=true ;;
     --yes|-y)  AUTO_YES=true ;;
     --all)     PUSH_ALL=true ;;
     --pick)    PUSH_PICK=true ;;
@@ -397,10 +399,18 @@ if [[ "${PLACEHOLDER_TAG}" != *".edge"* && "${PLACEHOLDER_TAG}" != *".X"* ]]; th
   echo "   Tag: ${PLACEHOLDER_TAG}"
   exit 1
 fi
-if ! docker image inspect "${PLACEHOLDER_TAG}" &>/dev/null; then
-  echo "❌  Image not found: ${PLACEHOLDER_TAG}"
-  echo "   Run docker-build ${IMAGE} first (with BUILD_ENV=${BUILD_ENV})"
-  exit 1
+if $REMOTE_MODE; then
+  if ! docker manifest inspect "${PLACEHOLDER_TAG}" &>/dev/null; then
+    echo "❌  Remote manifest not found: ${PLACEHOLDER_TAG}"
+    echo "   Run docker-build --push ${IMAGE} first (multi-arch buildx push)"
+    exit 1
+  fi
+else
+  if ! docker image inspect "${PLACEHOLDER_TAG}" &>/dev/null; then
+    echo "❌  Image not found: ${PLACEHOLDER_TAG}"
+    echo "   Run docker-build ${IMAGE} first (with BUILD_ENV=${BUILD_ENV})"
+    exit 1
+  fi
 fi
 
 # --- Confirm non-stage/prod push ----------------------------------------------
@@ -620,7 +630,13 @@ _local_image_id() {
 }
 
 # --- Check if image unchanged from edge — skip version increment if so -------
-LOCAL_DIGEST=$(_local_image_id "${PLACEHOLDER_TAG}")
+if $REMOTE_MODE; then
+  LOCAL_DIGEST=$(docker manifest inspect "${PLACEHOLDER_TAG}" 2>/dev/null \
+    | grep -o '"digest"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -1 | grep -o 'sha256:[a-f0-9]*' || echo "")
+else
+  LOCAL_DIGEST=$(_local_image_id "${PLACEHOLDER_TAG}")
+fi
 LOCAL_SHORT=$(echo "$LOCAL_DIGEST" | sed 's/sha256://' | cut -c1-12)
 EDGE_MATCHES_LOCAL=false
 
@@ -751,8 +767,14 @@ if (( ${#EXISTING_TAGS[@]} > 0 )); then
 fi
 
 # --- Retag --------------------------------------------------------------------
-echo "🏷️   Retagging → ${VERSION_TAG}..."
-docker tag "${PLACEHOLDER_TAG}" "${REGISTRY}/${IMAGE}:${VERSION_TAG}"
+if $REMOTE_MODE; then
+  # Remote mode: version tag is applied on the registry via `buildx imagetools
+  # create` after Infisical update — no local docker tag needed.
+  :
+else
+  echo "🏷️   Retagging → ${VERSION_TAG}..."
+  docker tag "${PLACEHOLDER_TAG}" "${REGISTRY}/${IMAGE}:${VERSION_TAG}"
+fi
 
 # --- Update Infisical ---------------------------------------------------------
 for upd in "${UPDATES[@]}"; do
@@ -764,8 +786,10 @@ for upd in "${UPDATES[@]}"; do
     echo "  ✅  ${upd_key} → ${upd_val}"
   else
     echo "  ❌  Failed to update ${upd_key} (HTTP ${HTTP_CODE})"
-    echo "     Cleaning up local tag to prevent version drift..."
-    cleanup_version_tag "$REGISTRY" "$IMAGE" "$VERSION_TAG"
+    if ! $REMOTE_MODE; then
+      echo "     Cleaning up local tag to prevent version drift..."
+      cleanup_version_tag "$REGISTRY" "$IMAGE" "$VERSION_TAG"
+    fi
     echo "     Fix Infisical access or manually set ${VERSIONS_PATH}/${upd_key} = ${upd_val}, then retry."
     exit 1
   fi
@@ -796,36 +820,53 @@ _push_with_dots() {
 }
 
 # --- Push ---------------------------------------------------------------------
-PUSH_LOG="${INFRA_ROOT}/.tmp/docker-push-${IMAGE}-$(date +%Y%m%d-%H%M%S).log"
-mkdir -p "${INFRA_ROOT}/.tmp"
-echo "🚀  Pushing ${#PUSH_TAGS[@]} tag(s)...  (log: ${PUSH_LOG})"
 PUSHED_OK=()
 PUSHED_FAIL=()
 
-for i in "${!PUSH_TAGS[@]}"; do
-  tag="${PUSH_TAGS[$i]}"
-  label="${PUSH_LABELS[$i]}"
-  printf "   🕐 :%-40s [%s] " "${tag}" "${label}" >&2
-  if [[ "$label" == "commit" ]]; then
-    # SHA tag is best-effort — don't fail the push
-    if _push_with_dots "${REGISTRY}/${IMAGE}:${tag}" "$PUSH_LOG"; then
-      PUSHED_OK+=("$tag")
-      echo " ok" >&2
-    else
-      PUSHED_FAIL+=("$tag")
-      echo " skip" >&2
-    fi
+if $REMOTE_MODE; then
+  # Remote mode: image already published by buildx --push. Use `buildx
+  # imagetools create` to add the version tag to the existing manifest on
+  # the registry (no local docker push needed).
+  echo "🚀  Creating remote version tag via buildx imagetools..."
+  if docker buildx imagetools create \
+        -t "${REGISTRY}/${IMAGE}:${VERSION_TAG}" \
+        "${PLACEHOLDER_TAG}"; then
+    PUSHED_OK+=("$VERSION_TAG")
+    echo "   ✅  ${VERSION_TAG}"
   else
-    if _push_with_dots "${REGISTRY}/${IMAGE}:${tag}" "$PUSH_LOG"; then
-      PUSHED_OK+=("$tag")
-      echo " ok" >&2
-    else
-      echo " FAILED (see ${PUSH_LOG})" >&2
-      echo "❌  Push failed for :${tag} — check log: ${PUSH_LOG}"
-      exit 1
-    fi
+    echo "❌  Failed to create remote tag :${VERSION_TAG}"
+    exit 1
   fi
-done
+else
+  PUSH_LOG="${INFRA_ROOT}/.tmp/docker-push-${IMAGE}-$(date +%Y%m%d-%H%M%S).log"
+  mkdir -p "${INFRA_ROOT}/.tmp"
+  echo "🚀  Pushing ${#PUSH_TAGS[@]} tag(s)...  (log: ${PUSH_LOG})"
+
+  for i in "${!PUSH_TAGS[@]}"; do
+    tag="${PUSH_TAGS[$i]}"
+    label="${PUSH_LABELS[$i]}"
+    printf "   🕐 :%-40s [%s] " "${tag}" "${label}" >&2
+    if [[ "$label" == "commit" ]]; then
+      # SHA tag is best-effort — don't fail the push
+      if _push_with_dots "${REGISTRY}/${IMAGE}:${tag}" "$PUSH_LOG"; then
+        PUSHED_OK+=("$tag")
+        echo " ok" >&2
+      else
+        PUSHED_FAIL+=("$tag")
+        echo " skip" >&2
+      fi
+    else
+      if _push_with_dots "${REGISTRY}/${IMAGE}:${tag}" "$PUSH_LOG"; then
+        PUSHED_OK+=("$tag")
+        echo " ok" >&2
+      else
+        echo " FAILED (see ${PUSH_LOG})" >&2
+        echo "❌  Push failed for :${tag} — check log: ${PUSH_LOG}"
+        exit 1
+      fi
+    fi
+  done
+fi
 
 echo ""
 echo "=============================================="

@@ -688,7 +688,7 @@ if [[ ${#TARGETS[@]} -eq 1 ]]; then
     # and attach :v<M>.<m>.N[-env] via `buildx imagetools create`.
     info "Multi-arch manifest pushed to ${REGISTRY}"
     echo ""
-    "$SCRIPT_DIR/docker-push" --remote "$IMAGE" "${_BUILT_VSN:-}" \
+    docker-push --remote "$IMAGE" "${_BUILT_VSN:-}" \
       "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
 
   elif $AUTO_PUSH; then
@@ -696,7 +696,7 @@ if [[ ${#TARGETS[@]} -eq 1 ]]; then
     # Hand off in --remote mode with the edge VSN.
     info "Single-arch manifest pushed to ${REGISTRY}"
     echo ""
-    "$SCRIPT_DIR/docker-push" --remote "$IMAGE" "${_BUILT_VSN:-}" \
+    docker-push --remote "$IMAGE" "${_BUILT_VSN:-}" \
       "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
 
   elif ! $SILENT; then
@@ -836,7 +836,7 @@ if (( ${#SUCCEEDED[@]} > 0 )); then
     echo ""
     for image in "${SUCCEEDED[@]}"; do
       echo "--- Pushing ${image} ---"
-      "$SCRIPT_DIR/docker-push" "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
+      docker-push "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
         "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
     done
   elif $ASKED_UPFRONT; then
@@ -848,7 +848,7 @@ if (( ${#SUCCEEDED[@]} > 0 )); then
     if _confirm "Push ${#SUCCEEDED[@]} successful build(s)?"; then
       for image in "${SUCCEEDED[@]}"; do
         echo "--- Pushing ${image} ---"
-        "$SCRIPT_DIR/docker-push" "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
+        docker-push "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
           "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
       done
     else
