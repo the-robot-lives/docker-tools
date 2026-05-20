@@ -17,30 +17,16 @@ make install    # Installs docker-build, docker-push to ~/.local/bin
 
 ## Configuration
 
-### Required (in config.env)
+All configuration lives in `k8-util-config.yaml` (see [k8-lib README](../k8-lib/README.md) for setup). Every tool accepts `--config <path>` to specify an alternative config file.
 
-```bash
-K8_DOCKER_REGISTRY="ops.noizu.com"
+### Relevant Sections
+
+```yaml
+docker:
+  registry: "ops.noizu.com"
 ```
 
-### Optional Config Files (at project root)
-
-**docker-repos.conf** — List of Docker repos to manage (one per line):
-
-```
-codefre.sh/backend
-codefre.sh/frontend
-noizu-website
-```
-
-If absent, repos are discovered from `project.yaml` `docker.images[]` entries.
-
-**docker-mappings.conf** — Custom image-to-directory mappings (rarely needed):
-
-```
-# Format: image_name|dir_name|dockerfile|single_stage
-my-api|web|Dockerfile.api|false
-```
+Docker image repos are auto-discovered from `project.yaml` `docker.images[]` entries.
 
 ### project.yaml Integration
 

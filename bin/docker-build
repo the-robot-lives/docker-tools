@@ -38,6 +38,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8_LIB_DIR="${K8_LIB_DIR:-$(cd "$SCRIPT_DIR/../../k8-lib" 2>/dev/null && pwd || echo "${HOME}/.local/share/k8-lib")}"
 INFRA_ROOT="${INFRA_ROOT:-$(pwd)}"
 
+# Pre-parse --config (must resolve before k8-lib sourcing)
+for _k8_arg in "$@"; do
+  case "$_k8_arg" in
+    --config=*) export K8_CONFIG="${_k8_arg#--config=}" ;;
+  esac
+done
+_k8_prev=""
+for _k8_arg in "$@"; do
+  [[ "$_k8_prev" == "--config" ]] && export K8_CONFIG="$_k8_arg"
+  _k8_prev="$_k8_arg"
+done
+unset _k8_arg _k8_prev
+
 source "$K8_LIB_DIR/bin/docker-config.sh"
 [[ -f "${INFRA_ROOT}/docker-hooks.sh" ]] && source "${INFRA_ROOT}/docker-hooks.sh"
 
@@ -96,6 +109,7 @@ cat <<EOF
     --publish-chart    Auto-publish helm chart to OCI registry after push
     --no-publish-chart Skip helm chart publish prompt after push
     --yes, -y          Auto-confirm all prompts
+    --config <path>    Use alternate k8-lib config file
     -h, --help         Show this help
 
   ${BLU}Default behavior:${NC}
@@ -166,6 +180,8 @@ while [[ $# -gt 0 ]]; do
     --vsn)       EXPLICIT_VSN="$2"; shift ;;
     --publish-chart)    export DOCKER_PUSH_HELM_PUBLISH_MODE=yes ;;
     --no-publish-chart) export DOCKER_PUSH_HELM_PUBLISH_MODE=no ;;
+    --config) shift ;;
+    --config=*) ;;
     --include=*) INCLUDE_LIST="${1#--include=}" ;;
     --include)   INCLUDE_LIST="$2"; shift ;;
     -h|--help)   usage; exit 0 ;;
