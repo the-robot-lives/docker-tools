@@ -114,11 +114,11 @@ cat <<EOF
 
   ${BLU}Default behavior:${NC}
     Builds ${BOLD}linux/amd64 + linux/arm64${NC} (multiarch) when K8_DOCKER_MULTIARCH=true
-    in config.env (default). Uses QEMU on arm64 hosts.
+    in .envrc.k8.dc (default). Uses QEMU on arm64 hosts.
     Use ${BOLD}--native${NC} to build for the host arch only (fast local iteration).
 
   ${BLU}Environment:${NC}
-    K8_DOCKER_MULTIARCH=true/false          Default multiarch mode (config.env)
+    K8_DOCKER_MULTIARCH=true/false          Default multiarch mode (.envrc.k8.dc)
     DOCKER_BUILD_QUIET_CONTAINERD_NUDGE=1   Silence the containerd-store nudge
     DOCKER_YES=true                         Auto-confirm prompts
 

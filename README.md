@@ -17,7 +17,7 @@ make install    # Installs docker-build, docker-push to ~/.local/bin
 
 ## Configuration
 
-All configuration lives in `k8-util-config.yaml` (see [k8-lib README](../k8-lib/README.md) for setup). Every tool accepts `--config <path>` to specify an alternative config file.
+All configuration lives in `infra-config.yaml` (see [k8-lib README](../k8-lib/README.md) for setup). Every tool accepts `--config <path>` to specify an alternative config file.
 
 ### Relevant Sections
 
@@ -26,11 +26,11 @@ docker:
   registry: "ops.noizu.com"
 ```
 
-Docker image repos are auto-discovered from `project.yaml` `docker.images[]` entries.
+Docker image repos are auto-discovered from `infra-config.yaml` `project.docker.images[]` entries.
 
-### project.yaml Integration
+### infra-config.yaml Project Integration
 
-Images are auto-discovered from `project.yaml`:
+Images are auto-discovered from the `project` section of `infra-config.yaml`:
 
 ```yaml
 docker:
@@ -50,7 +50,7 @@ docker:
 ## Usage
 
 ```bash
-docker-build                    # Build all images in project.yaml
+docker-build                    # Build all images in infra-config.yaml
 docker-build my-app             # Build specific image
 docker-build --pick             # Interactive selection
 docker-build --no-cache         # Force fresh build
