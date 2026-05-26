@@ -480,7 +480,6 @@ _build_single() {
     fi
 
     CMD=(docker buildx build --platform "$TARGET_PLATFORMS")
-    CMD+=("${cache_flags[@]}")
 
     # Output mode:
     #   --push        → publish multi-arch manifest to the registry
@@ -489,9 +488,10 @@ _build_single() {
     #                   want the follow-up push confirmation to be instant)
     #   single        → --load: runnable image in local docker
     if $AUTO_PUSH; then
-      CMD+=(--push)
+      CMD+=("${cache_flags[@]}" --push)
       OUTPUT_MODE="push"
     elif $MULTI_PLATFORM; then
+      CMD+=("${cache_flags[@]}")
       # Multi-platform without --push: cache only
       # (--load only works for multi-arch with containerd image store)
       OUTPUT_MODE="cache"
@@ -499,6 +499,10 @@ _build_single() {
         _nudge_containerd_store
       fi
     else
+      # --load (native): skip cache export on classic docker driver
+      if $HAS_CONTAINERD_STORE; then
+        CMD+=("${cache_flags[@]}")
+      fi
       CMD+=(--load)
       OUTPUT_MODE="load"
     fi
