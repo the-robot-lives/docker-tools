@@ -374,8 +374,16 @@ else
   fi
 fi
 
+# --- Resolve registry path (registry_path override from infra-config.yaml) ----
+IMAGE_KEY="$IMAGE"
+if declare -f _registry_path_for_image &>/dev/null; then
+  _rp="$(_registry_path_for_image "$IMAGE")"
+  [[ -n "$_rp" ]] && IMAGE="$_rp"
+  unset _rp
+fi
+
 # --- Navigate to repo directory -----------------------------------------------
-REPO_DIR="$(get_repo_dir "$IMAGE")"
+REPO_DIR="$(get_repo_dir "$IMAGE_KEY")"
 if [[ ! -d "$REPO_DIR" ]]; then
   echo "❌  Repo directory not found: $REPO_DIR"
   exit 1
@@ -399,12 +407,12 @@ if ! resolve_vsn "$REGISTRY" "$IMAGE" "$VSN_INPUT"; then
   if [[ -n "${RECENT_TAGS:-}" ]]; then
     echo ""
     echo "   Most recent tags: ${RECENT_TAGS}"
-    echo "   Specify version explicitly:  docker-push ${IMAGE} v1.0.edge-dev"
+    echo "   Specify version explicitly:  docker-push ${IMAGE_KEY} v1.0.edge-dev"
   fi
   exit 1
 fi
 
-echo "📋  ${IMAGE} v${VSN_MAJOR}.${VSN_MINOR}.edge (${BUILD_ENV})"
+echo "📋  ${IMAGE_KEY} v${VSN_MAJOR}.${VSN_MINOR}.edge (${BUILD_ENV})"
 echo "   Infisical key: ${VERSION_KEY} / ${VERSION_TYPE_KEY}"
 echo "   Placeholder:   ${PLACEHOLDER_TAG}"
 $DRY_RUN && echo "   Mode:          DRY RUN (no push, no version update)"
@@ -419,13 +427,13 @@ fi
 if $REMOTE_MODE; then
   if ! docker manifest inspect "${PLACEHOLDER_TAG}" &>/dev/null; then
     echo "❌  Remote manifest not found: ${PLACEHOLDER_TAG}"
-    echo "   Run docker-build --push ${IMAGE} first (multi-arch buildx push)"
+    echo "   Run docker-build --push ${IMAGE_KEY} first (multi-arch buildx push)"
     exit 1
   fi
 else
   if ! docker image inspect "${PLACEHOLDER_TAG}" &>/dev/null; then
     echo "❌  Image not found: ${PLACEHOLDER_TAG}"
-    echo "   Run docker-build ${IMAGE} first (with BUILD_ENV=${BUILD_ENV})"
+    echo "   Run docker-build ${IMAGE_KEY} first (with BUILD_ENV=${BUILD_ENV})"
     exit 1
   fi
 fi
@@ -519,7 +527,7 @@ if [[ "$BUILD_ENV" == "prod" ]]; then
   if [[ -z "$CURRENT_PATCH" || "$CURRENT_PATCH" == "null" ]]; then
     NEXT_PATCH=0
     echo ""
-    echo "⚠️  v${VSN_MAJOR}.${VSN_MINOR} not yet released for ${IMAGE}"
+    echo "⚠️  v${VSN_MAJOR}.${VSN_MINOR} not yet released for ${IMAGE_KEY}"
     echo "   This will be the first push (v${VSN_MAJOR}.${VSN_MINOR}.0)."
     if ! $DRY_RUN; then
       # Safety: always prompt for CHANGELOG even with --yes
@@ -573,7 +581,7 @@ else
   if [[ -z "$CURRENT_SUB" || "$CURRENT_SUB" == "null" ]]; then
     NEXT_SUB=0
     echo ""
-    echo "⚠️  v${VSN_MAJOR}.${VSN_MINOR}.${PATCH_FOR_TAG}${ENV_SUFFIX} not yet released for ${IMAGE}"
+    echo "⚠️  v${VSN_MAJOR}.${VSN_MINOR}.${PATCH_FOR_TAG}${ENV_SUFFIX} not yet released for ${IMAGE_KEY}"
     echo "   This will be the first ${BUILD_ENV} push for this version track."
     if ! $DRY_RUN; then
       _confirm "   Continue?" || { echo "Aborted."; exit 0; }
@@ -680,7 +688,7 @@ if ! $FORCE_UP && [[ -n "$LOCAL_DIGEST" ]]; then
 fi
 
 echo ""
-echo "  Push Plan: ${IMAGE}"
+echo "  Push Plan: ${IMAGE_KEY}"
 echo "  ────────────────────────────────────────────────"
 
 if [[ -n "$LOCAL_SHORT" ]]; then
@@ -855,7 +863,7 @@ if $REMOTE_MODE; then
     exit 1
   fi
 else
-  PUSH_LOG="${INFRA_ROOT}/.tmp/docker-push-${IMAGE}-$(date +%Y%m%d-%H%M%S).log"
+  PUSH_LOG="${INFRA_ROOT}/.tmp/docker-push-${IMAGE_KEY}-$(date +%Y%m%d-%H%M%S).log"
   mkdir -p "${INFRA_ROOT}/.tmp"
   echo "🚀  Pushing ${#PUSH_TAGS[@]} tag(s)...  (log: ${PUSH_LOG})"
 
@@ -887,7 +895,7 @@ fi
 
 echo ""
 echo "=============================================="
-echo "  Pushed ${#PUSHED_OK[@]}/${#PUSH_TAGS[@]} tags → ${IMAGE}"
+echo "  Pushed ${#PUSHED_OK[@]}/${#PUSH_TAGS[@]} tags → ${IMAGE_KEY}"
 for ptag in "${PUSHED_OK[@]}"; do
   echo "     ✅  :${ptag}"
 done
@@ -900,7 +908,7 @@ echo "=============================================="
 
 # --- Update helm values tag (--release) ----------------------------------------
 if $RELEASE; then
-  _helm_dir="${INFRA_ROOT}/helm/${IMAGE}"
+  _helm_dir="${INFRA_ROOT}/helm/${IMAGE_KEY}"
 
   if [[ ! -d "$_helm_dir" ]]; then
     echo "⚠️  No helm chart at ${_helm_dir} — skipping tag update"
@@ -944,7 +952,7 @@ if $RELEASE; then
 fi
 
 # --- Record push state --------------------------------------------------------
-record_push_state "$IMAGE" "$GIT_SHA" "$VERSION_TAG"
+record_push_state "$IMAGE_KEY" "$GIT_SHA" "$VERSION_TAG"
 
 # --- Check for other unpushed builds ------------------------------------------
 cd "$ORIGINAL_DIR"
@@ -956,7 +964,7 @@ if [[ -n "$REMAINING" ]]; then
   while IFS= read -r line; do
     line_rest="${line#*|}"
     line_img="${line_rest%%|*}"
-    [[ "$line_img" == "$IMAGE" ]] && continue
+    [[ "$line_img" == "$IMAGE_KEY" ]] && continue
     OTHER_BUILDS="${OTHER_BUILDS:+${OTHER_BUILDS}
 }${line}"
   done <<< "$REMAINING"

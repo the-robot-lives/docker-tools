@@ -91,7 +91,7 @@ cat <<EOF
   ${BLU}Flags:${NC}
     --all              Build all known images (parallel via zellij or background)
     --pick             Interactive selection from known images
-    --include LIST     Comma-separated list of specific targets
+    --include LIST     Comma-separated list of specific targets (supports globs: startapp/*)
     --native           Native arch only — local docker (no push)
     --multiarch        Build both linux/amd64 and linux/arm64 (opt-in)
     --platform LIST    Explicit platform list (e.g. linux/amd64,linux/arm64)
@@ -341,6 +341,19 @@ _build_single() {
     return 1
   fi
 
+  # --- Per-image platform override ---
+  local TARGET_PLATFORMS="$TARGET_PLATFORMS"
+  local MULTI_PLATFORM="$MULTI_PLATFORM"
+  if declare -f _platform_for_image &>/dev/null; then
+    local _img_platform
+    _img_platform="$(_platform_for_image "$image")"
+    if [[ -n "$_img_platform" ]]; then
+      TARGET_PLATFORMS="$_img_platform"
+      MULTI_PLATFORM=false
+      [[ "$TARGET_PLATFORMS" == *","* ]] && MULTI_PLATFORM=true
+    fi
+  fi
+
   # --- Resolve registry path ---
   local registry_path
   if declare -f _registry_path_for_image &>/dev/null; then
@@ -427,11 +440,20 @@ _build_single() {
     _build_args_for_image "$image" "$build_env" build_args
   fi
 
-  # --- GITHUB_TOKEN secret injection for frontend builds ---
+  # --- Secret injection for frontend builds (npm registry auth) ---
   local secret_flags=()
   if [[ "$image" =~ /frontend$ ]]; then
-    secret_flags=(--secret id=github_token,env=GITHUB_TOKEN)
-    info "Secret         : github_token (from \$GITHUB_TOKEN)"
+    # Resolve NPM_TOKEN: env var → ~/.npmrc extraction
+    if [[ -z "${NPM_TOKEN:-}" ]]; then
+      NPM_TOKEN="$(grep '//npm.noizu.com/:_authToken=' ~/.npmrc 2>/dev/null | sed 's/.*_authToken=//' | tr -d '"' || true)"
+    fi
+    if [[ -n "${NPM_TOKEN:-}" ]]; then
+      export NPM_TOKEN
+      secret_flags=(--secret id=npm_token,env=NPM_TOKEN)
+      info "Secret         : npm_token (Verdaccio auth)"
+    else
+      warn "No NPM_TOKEN found — private @noizu packages will fail to install"
+    fi
   fi
 
   # --- Target stage (dev vs production) ---
@@ -585,10 +607,23 @@ elif $BUILD_INCLUDE; then
   IFS=',' read -ra _inc_items <<< "$INCLUDE_LIST"
   for item in "${_inc_items[@]}"; do
     item="${item## }"; item="${item%% }"
-    if resolved=$(normalize_repo_name "$item"); then
+    # Glob expansion: "startapp/*" matches all repos prefixed with "startapp/"
+    if [[ "$item" == *'*'* || "$item" == *'?'* ]]; then
+      _glob_matched=false
+      for repo in "${DOCKER_REPOS[@]}"; do
+        # shellcheck disable=SC2053
+        if [[ "$repo" == $item ]]; then
+          TARGETS+=("$repo")
+          _glob_matched=true
+        fi
+      done
+      if ! $_glob_matched; then
+        die "No repos matched glob pattern: $item\n   Known repos: $(get_all_docker_repos 2>/dev/null | tr '\n' ' ')"
+      fi
+    elif resolved=$(normalize_repo_name "$item"); then
       TARGETS+=("$resolved")
     else
-      die "Unknown target in --include: $item"
+      die "Unknown target in --include: $item\n   Known repos: $(get_all_docker_repos 2>/dev/null | tr '\n' ' ')"
     fi
   done
   echo "Building: ${TARGETS[*]}"
@@ -767,7 +802,7 @@ done
 # --- Zellij multi-build mode ------------------------------------------------
 if command -v zellij &>/dev/null && ! $NO_ZELLIJ && (( ${#TARGETS[@]} > 1 )); then
   SESSION_NAME="build-$(date +%H%M%S)"
-  layout_file="$(mktemp /tmp/docker-build-zj-XXXXXX.kdl)"
+  layout_file="/tmp/docker-build-zj-$(head -c6 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c8).kdl"
 
   {
     echo "layout {"
