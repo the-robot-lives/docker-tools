@@ -14,6 +14,10 @@
 #   docker-push --pick                  # interactive selection, push in panes
 #   docker-push --include my-backend,my-frontend  # specific targets
 #   docker-push --all --no-zellij       # push all repos sequentially
+#   docker-push --stage                 # set BUILD_ENV=stage
+#   docker-push --prod                  # set BUILD_ENV=prod
+#   docker-push --dev                   # set BUILD_ENV=dev
+#   docker-push --env=prod              # set BUILD_ENV to a custom value
 #   BUILD_ENV=prod docker-push          # override environment
 # =============================================================================
 set -euo pipefail
@@ -112,6 +116,11 @@ while [[ $# -gt 0 ]]; do
     --all)     PUSH_ALL=true ;;
     --pick)    PUSH_PICK=true ;;
     --no-zellij) NO_ZELLIJ=true ;;
+    --stage)   export BUILD_ENV=stage ;;
+    --prod)    export BUILD_ENV=prod ;;
+    --dev)     export BUILD_ENV=dev ;;
+    --env=*)   export BUILD_ENV="${1#--env=}" ;;
+    --env)     export BUILD_ENV="$2"; shift ;;
     --release) RELEASE=true ;;
     --config) shift ;;
     --config=*) ;;

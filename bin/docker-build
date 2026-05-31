@@ -101,7 +101,7 @@ cat <<EOF
     --dev              Target the "dev" stage in multi-stage Dockerfile
     --stage            Set BUILD_ENV=stage
     --prod             Set BUILD_ENV=prod
-    --env=ENV          Set BUILD_ENV to a custom value
+    --env ENV, --env=ENV  Set BUILD_ENV to a custom value
     --vsn VERSION      Explicit version tag (e.g., 3.2.edge, v1.0.edge-stage)
     --no-cache         Build with --no-cache
     --no-zellij        Multi-build without zellij (background jobs + logs)
@@ -172,6 +172,7 @@ while [[ $# -gt 0 ]]; do
     --stage)   export BUILD_ENV=stage ;;
     --prod)    export BUILD_ENV=prod ;;
     --env=*)   export BUILD_ENV="${1#--env=}" ;;
+    --env)     export BUILD_ENV="$2"; shift ;;
     --no-buildx) USE_BUILDX=false ;;
     --no-cache)  NO_CACHE=true ;;
     --no-zellij) NO_ZELLIJ=true ;;
