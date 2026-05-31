@@ -36,6 +36,8 @@ done
 unset _k8_arg _k8_prev
 
 source "$K8_LIB_DIR/bin/docker-config.sh"
+source "$K8_LIB_DIR/bin/assist.sh"
+_k8_check_assist "$0" "$@"
 
 # --- Toggle-list helper ------------------------------------------------------
 # Usage: _toggle_input SELECTED_ARRAY_NAME MAX_COUNT
