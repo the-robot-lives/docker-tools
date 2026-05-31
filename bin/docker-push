@@ -23,7 +23,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-K8_LIB_DIR="${K8_LIB_DIR:-$(cd "$SCRIPT_DIR/../../k8-lib" 2>/dev/null && pwd || echo "${HOME}/.local/share/k8-lib")}"
+K8_LIB_DIR="${K8_LIB_DIR:-${HOME}/.local/share/k8-lib}"
 INFRA_ROOT="${INFRA_ROOT:-$(pwd)}"
 
 # Pre-parse --config (must resolve before k8-lib sourcing)
@@ -454,25 +454,40 @@ if [[ "$BUILD_ENV" != "stage" && "$BUILD_ENV" != "prod" ]] && ! $DRY_RUN; then
 fi
 
 # --- Infisical config ---------------------------------------------------------
-INFISICAL_HOST="${INFISICAL_HOST:-${K8_INFISICAL_HOST:-}}"
+INFISICAL_HOST="${INFISICAL_HOST:-${K8_INFISICAL_HOST:-$(_dc_get secrets infisical.host '' '')}}"
+PROJECT_SLUG="${INFISICAL_PROJECT_SLUG:-${K8_INFISICAL_PROJECT_SLUG:-$(_dc_get secrets infisical.project_slug '' '')}}"
 PROJECT_ID="${INFISICAL_PROJECT_ID:-${K8_INFISICAL_PROJECT_ID:-}}"
 ENV_SLUG="${INFISICAL_ENV:-prod}"
 VERSIONS_PATH="/docker-versions"
 
-EKS_OPERATOR_CLIENT_ID="${EKS_OPERATOR_CLIENT_ID:-}"
-EKS_OPERATOR_CLIENT_SECRET="${EKS_OPERATOR_CLIENT_SECRET:-}"
+EKS_OPERATOR_CLIENT_ID="${EKS_OPERATOR_CLIENT_ID:-${K8_INFISICAL_CLIENT_ID:-$(_dc_get secrets operator.client_id '' '')}}"
+EKS_OPERATOR_CLIENT_SECRET="${EKS_OPERATOR_CLIENT_SECRET:-${K8_INFISICAL_CLIENT_SECRET:-$(_dc_get secrets operator.client_secret '' '')}}"
+if [[ -z "$INFISICAL_HOST" ]]; then
+  echo "❌  INFISICAL_HOST is not set"
+  echo "   source .envrc or configure k8.infisical.host / secrets.infisical.host"
+  exit 1
+fi
+INFISICAL_HOST="${INFISICAL_HOST%/api}"
+INFISICAL_HOST="${INFISICAL_HOST%/}"
 if [[ -z "$EKS_OPERATOR_CLIENT_ID" || -z "$EKS_OPERATOR_CLIENT_SECRET" ]]; then
   echo "❌  EKS_OPERATOR_CLIENT_ID and EKS_OPERATOR_CLIENT_SECRET must be set"
-  echo "   source .envrc or export them manually"
+  echo "   source .envrc or configure k8.infisical.client_id/client_secret"
   exit 1
+fi
+
+CF_ACCESS_ID="${CF_ACCESS_CLIENT_ID:-$(_dc_get cf access.client_id '' '')}"
+CF_ACCESS_SECRET="${CF_ACCESS_CLIENT_SECRET:-$(_dc_get cf access.client_secret '' '')}"
+CF_HEADERS=()
+if [[ -n "$CF_ACCESS_ID" && -n "$CF_ACCESS_SECRET" ]]; then
+  CF_HEADERS=(-H "CF-Access-Client-Id: ${CF_ACCESS_ID}" -H "CF-Access-Client-Secret: ${CF_ACCESS_SECRET}")
 fi
 
 # --- Auth ---------------------------------------------------------------------
 echo "🔑  Authenticating with Infisical..."
 
-AUTH_CURL_CMD="curl -s -X POST ${INFISICAL_HOST}/api/v1/auth/universal-auth/login -H 'Content-Type: application/json' -d '{\"clientId\":\"${EKS_OPERATOR_CLIENT_ID}\",\"clientSecret\":\"${EKS_OPERATOR_CLIENT_SECRET}\"}'"
+AUTH_CURL_CMD="curl -s -X POST ${INFISICAL_HOST}/api/v1/auth/universal-auth/login -H 'Content-Type: application/json' -d '{\"clientId\":\"<redacted>\",\"clientSecret\":\"<redacted>\"}'"
 
-LOGIN_RESPONSE=$(curl -s -X POST "${INFISICAL_HOST}/api/v1/auth/universal-auth/login" \
+LOGIN_RESPONSE=$(curl -s ${CF_HEADERS[@]+"${CF_HEADERS[@]}"} -X POST "${INFISICAL_HOST}/api/v1/auth/universal-auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"clientId\":\"${EKS_OPERATOR_CLIENT_ID}\",\"clientSecret\":\"${EKS_OPERATOR_CLIENT_SECRET}\"}" 2>&1) || true
 
@@ -489,11 +504,27 @@ if [[ -z "$API_TOKEN" ]]; then
 fi
 echo "  ✅  Authenticated"
 
+if [[ -z "$PROJECT_ID" && -n "${PROJECT_SLUG:-}" ]]; then
+  PROJECT_RESPONSE=$(curl -s ${CF_HEADERS[@]+"${CF_HEADERS[@]}"} -X GET "${INFISICAL_HOST}/api/v1/projects/slug/${PROJECT_SLUG}" \
+    -H "Authorization: Bearer ${API_TOKEN}" \
+    -H "Content-Type: application/json" 2>&1) || true
+  if command -v jq &>/dev/null; then
+    PROJECT_ID="$(echo "$PROJECT_RESPONSE" | jq -r '.id // .project.id // empty' 2>/dev/null || true)"
+  else
+    PROJECT_ID="$(echo "$PROJECT_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+  fi
+fi
+if [[ -z "$PROJECT_ID" ]]; then
+  echo "❌  Could not resolve Infisical project ID"
+  echo "   Set INFISICAL_PROJECT_ID or configure secrets.infisical.project_slug"
+  exit 1
+fi
+
 # --- Infisical helpers --------------------------------------------------------
 _fetch_secret() {
   local key="$1"
   local response
-  response=$(curl -s \
+  response=$(curl -s ${CF_HEADERS[@]+"${CF_HEADERS[@]}"} \
     "${INFISICAL_HOST}/api/v4/secrets/${key}" \
     -H "Authorization: Bearer ${API_TOKEN}" \
     -G --data-urlencode "projectId=${PROJECT_ID}" \
@@ -508,14 +539,14 @@ _update_secret() {
   local key="$1" value="$2"
   local http_code
 
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+  http_code=$(curl -s ${CF_HEADERS[@]+"${CF_HEADERS[@]}"} -o /dev/null -w "%{http_code}" \
     -X POST "${INFISICAL_HOST}/api/v4/secrets/${key}" \
     -H "Authorization: Bearer ${API_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "{\"projectId\":\"${PROJECT_ID}\",\"environment\":\"${ENV_SLUG}\",\"secretPath\":\"${VERSIONS_PATH}\",\"secretValue\":\"${value}\",\"type\":\"shared\"}")
 
   if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    http_code=$(curl -s ${CF_HEADERS[@]+"${CF_HEADERS[@]}"} -o /dev/null -w "%{http_code}" \
       -X PATCH "${INFISICAL_HOST}/api/v4/secrets/${key}" \
       -H "Authorization: Bearer ${API_TOKEN}" \
       -H "Content-Type: application/json" \
