@@ -330,6 +330,39 @@ if [[ -n "$TARGET" ]] && ($BUILD_ALL || $BUILD_PICK || $BUILD_INCLUDE); then
 fi
 
 # =============================================================================
+# Elixir / BEAM build diagnostics
+# =============================================================================
+_is_elixir_dockerfile() {
+  local dockerfile="$1"
+  grep -Eq '^(FROM|ARG[[:space:]]+BASE_IMAGE=).*elixir:' "$dockerfile"
+}
+
+_has_qemu_safe_beam_jit() {
+  local dockerfile="$1"
+  grep -Eq 'ERL_AFLAGS=.*\+JMsingle[[:space:]]+true' "$dockerfile"
+}
+
+_has_scheduler_cap() {
+  local dockerfile="$1"
+  grep -Eq '(^ENV[[:space:]]+ERL_FLAGS=.*\+S[[:space:]]+[0-9]+:[0-9]+|^ENV[[:space:]]+ELIXIR_ERL_OPTIONS=.*\+S[[:space:]]+[0-9]+:[0-9]+|ERL_FLAGS="\+S[[:space:]]+[0-9]+:[0-9]+")' "$dockerfile"
+}
+
+_is_cross_platform_build() {
+  local platforms="$1"
+  local native
+  native="$(_detect_native_platform)"
+  [[ "$platforms" == *","* || "$platforms" != "$native" ]]
+}
+
+_buildx_stack_summary() {
+  local buildx_version buildkit_version
+  buildx_version="$(docker buildx version 2>/dev/null | awk '{print $2}' || true)"
+  buildkit_version="$(docker buildx inspect 2>/dev/null | awk '/^BuildKit version:/ {print $3; exit}' || true)"
+  [[ -n "$buildx_version$buildkit_version" ]] || return 0
+  echo "buildx=${buildx_version:-unknown} buildkit=${buildkit_version:-unknown}"
+}
+
+# =============================================================================
 # _build_single — Core build logic for one image
 # =============================================================================
 _build_single() {
@@ -402,11 +435,13 @@ _build_single() {
 
   # --- Resolve Dockerfile ---
   local dockerfile_flag=()
+  local dockerfile_path="${repo_dir}/Dockerfile"
   local custom_df
   custom_df="$(_dockerfile_for_image "$image")"
   if [[ -n "$custom_df" ]]; then
     local df_path="${repo_dir}/${custom_df}"
     if [[ -f "$df_path" ]]; then
+      dockerfile_path="$df_path"
       dockerfile_flag=(-f "$df_path")
       info "Dockerfile     : ${custom_df}"
     else
@@ -418,7 +453,24 @@ _build_single() {
       fail "No Dockerfile in ${repo_dir}"
       return 1
     fi
+    dockerfile_path="${repo_dir}/Dockerfile"
     info "Dockerfile     : Dockerfile (default)"
+  fi
+
+  if _is_elixir_dockerfile "$dockerfile_path"; then
+    info "Elixir build   : detected"
+    if _is_cross_platform_build "$TARGET_PLATFORMS"; then
+      local stack_summary
+      stack_summary="$(_buildx_stack_summary)"
+      [[ -n "$stack_summary" ]] && info "Buildx stack   : $stack_summary"
+      if ! _has_qemu_safe_beam_jit "$dockerfile_path"; then
+        warn "Elixir cross-arch build lacks ERL_AFLAGS='+JMsingle true'"
+      fi
+      if ! _has_scheduler_cap "$dockerfile_path"; then
+        warn "Elixir cross-arch build lacks a BEAM scheduler cap"
+      fi
+      info "QEMU 11 helper : docker-qemu11 registers Debian qemu-user-binfmt 11.x"
+    fi
   fi
 
   # --- Per-repo build args ---

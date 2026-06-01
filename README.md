@@ -5,7 +5,7 @@ Multi-architecture Docker image builds and registry push with version tracking.
 ## Installation
 
 ```bash
-make install    # Installs docker-build, docker-push to ~/.local/bin
+make install    # Installs docker-build, docker-push, docker-qemu11 to ~/.local/bin
 ```
 
 ## Prerequisites
@@ -55,11 +55,26 @@ docker-build my-app             # Build specific image
 docker-build --pick             # Interactive selection
 docker-build --no-cache         # Force fresh build
 docker-build --push             # Build + push in one step
+docker-qemu11                   # Register Debian QEMU 11.x for amd64 emulation
 
 docker-push                     # Push last build to registry
 docker-push my-app              # Push specific image
 docker-push --update-helm       # Auto-update Helm values after push
 ```
+
+## QEMU 11 for Elixir Builds
+
+`tonistiigi/binfmt:latest` can lag upstream QEMU. If Elixir/BEAM cross-arch
+builds fail under amd64 emulation on an arm64 host, run:
+
+```bash
+docker-qemu11
+docker-qemu11 --check
+```
+
+This replaces the Docker VM `qemu-x86_64` binfmt registration with Debian
+unstable `qemu-user-binfmt` 11.x. Rerun it after Docker Desktop or OrbStack
+restarts.
 
 ## State
 
