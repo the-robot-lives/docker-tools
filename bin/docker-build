@@ -203,6 +203,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 # =============================================================================
+# Infisical preflight — fail fast if push will need Infisical and it's broken
+# =============================================================================
+if $AUTO_PUSH && ! $FLAG_DRY_RUN; then
+  if _infisical_preflight; then
+    export _INFISICAL_PREFLIGHT_DONE=true
+    export INFISICAL_HOST API_TOKEN PROJECT_ID
+    export EKS_OPERATOR_CLIENT_ID EKS_OPERATOR_CLIENT_SECRET
+  else
+    echo ""
+    echo "   Infisical access is required for --push (version tagging)."
+    echo "   Fix credentials before building to avoid wasting build time."
+    exit 1
+  fi
+fi
+
+# =============================================================================
 # Platform resolution
 # =============================================================================
 _detect_native_platform() {
@@ -249,9 +265,7 @@ _nudge_containerd_store() {
 
 # Detect daemon capability once up front
 HAS_CONTAINERD_STORE=false
-if ! $FLAG_DRY_RUN; then
-  _has_containerd_image_store && HAS_CONTAINERD_STORE=true
-fi
+_has_containerd_image_store && HAS_CONTAINERD_STORE=true
 
 # Resolve target platforms
 if [[ -n "$EXPLICIT_PLATFORMS" ]]; then
@@ -940,7 +954,7 @@ echo "  Logs: ${LOG_DIR}/"
 echo ""
 
 # --- Push phase (sequential — Infisical auth is interactive) -----------------
-if (( ${#SUCCEEDED[@]} > 0 )) && ! $FLAG_DRY_RUN; then
+if (( ${#SUCCEEDED[@]} > 0 )); then
   _push_flags=()
   $MULTI_PLATFORM && _push_flags+=(--remote)
 
