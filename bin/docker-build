@@ -122,6 +122,7 @@ cat <<EOF
   ${BLU}Environment:${NC}
     K8_DOCKER_MULTIARCH=true/false          Default multiarch mode (.envrc.k8.dc)
     DOCKER_BUILD_QUIET_CONTAINERD_NUDGE=1   Silence the containerd-store nudge
+    DOCKER_BUILD_PANE_SHELL=/bin/zsh        Override shell used for zellij build panes
     DOCKER_YES=true                         Auto-confirm prompts
 
   ${BLU}Examples:${NC}
@@ -868,11 +869,61 @@ for pt in "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"; do
   PANE_FLAGS+=" ${pt}"
 done
 
+_resolve_build_pane_shell() {
+  local candidate shell_name
+
+  candidate="${DOCKER_BUILD_PANE_SHELL:-}"
+
+  if [[ -z "$candidate" ]] && [[ -n "${PPID:-}" ]] && command -v ps &>/dev/null; then
+    candidate="$(ps -p "$PPID" -o comm= 2>/dev/null | sed 's/^[[:space:]-]*//; s/[[:space:]]*$//' | head -n 1 || true)"
+    if [[ -n "$candidate" ]]; then
+      shell_name="$(basename "$candidate")"
+      case "$shell_name" in
+        bash|zsh|fish|ksh|mksh|dash|sh) ;;
+        *) candidate="" ;;
+      esac
+    fi
+  fi
+
+  [[ -z "$candidate" ]] && candidate="${SHELL:-/bin/bash}"
+
+  if [[ "$candidate" == */* ]]; then
+    if [[ -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+    candidate="$(basename "$candidate")"
+  fi
+
+  if command -v "$candidate" &>/dev/null; then
+    command -v "$candidate"
+    return
+  fi
+
+  printf 'bash'
+}
+
+_kdl_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  printf '%s' "$s"
+}
+
+PANE_SHELL="$(_resolve_build_pane_shell)"
+PANE_SHELL_EXEC_FLAG="-c"
+PANE_SHELL_KDL="$(_kdl_escape "$PANE_SHELL")"
+PANE_SHELL_EXEC_FLAG_KDL="$(_kdl_escape "$PANE_SHELL_EXEC_FLAG")"
+DOCKER_BUILD_SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+
 _build_pane_shell_command() {
   local image="$1"
-  local quoted_image
+  local quoted_build quoted_image quoted_shell
+  printf -v quoted_build '%q' "$DOCKER_BUILD_SELF"
   printf -v quoted_image '%q' "$image"
-  printf 'docker-build %s%s; exec bash' "$quoted_image" "$PANE_FLAGS"
+  printf -v quoted_shell '%q' "$PANE_SHELL"
+  printf '%s %s%s; exec %s' "$quoted_build" "$quoted_image" "$PANE_FLAGS" "$quoted_shell"
 }
 
 # --- Zellij multi-build mode ------------------------------------------------
@@ -882,7 +933,7 @@ if command -v zellij &>/dev/null && ! $NO_ZELLIJ && (( ${#TARGETS[@]} > 1 )); th
     echo "Adding ${#TARGETS[@]} build pane(s) to the current zellij tab..."
 
     for image in "${TARGETS[@]}"; do
-      zellij action new-pane --name "$image" --cwd "$PWD" -- bash -lc "$(_build_pane_shell_command "$image")"
+      zellij action new-pane --name "$image" --cwd "$PWD" -- "$PANE_SHELL" "$PANE_SHELL_EXEC_FLAG" "$(_build_pane_shell_command "$image")"
     done
 
     exit 0
@@ -895,9 +946,10 @@ if command -v zellij &>/dev/null && ! $NO_ZELLIJ && (( ${#TARGETS[@]} > 1 )); th
     echo "layout {"
     echo "  tab name=\"builds\" {"
     for image in "${TARGETS[@]}"; do
+      pane_command_kdl="$(_kdl_escape "$(_build_pane_shell_command "$image")")"
       echo "    pane name=\"${image}\" {"
-      echo "      command \"bash\""
-      echo "      args \"-c\" \"$(_build_pane_shell_command "$image")\""
+      echo "      command \"${PANE_SHELL_KDL}\""
+      echo "      args \"${PANE_SHELL_EXEC_FLAG_KDL}\" \"${pane_command_kdl}\""
       echo "    }"
     done
     echo "  }"
