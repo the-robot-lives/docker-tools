@@ -9,7 +9,7 @@ platform. Scripts read Docker targets from the merged `infra-config.yaml`
 docker-utils/
 ├── bin/                        # Executable utilities (installed to ~/.local/bin)
 │   ├── docker-build            #   Build configured image targets; aliases, buildx, --all/--pick parallel, --push/--release
-│   ├── docker-push             #   Push built/configured images; Infisical patch versioning, retag, --update-helm, zellij panes
+│   ├── docker-push             #   Push built/configured images; Infisical patch versioning, retag, --release helm bump, zellij panes
 │   └── docker-qemu11           #   Register QEMU 11.x binfmt for amd64 emulation on arm hosts (privileged; rerun after Docker restarts)
 ├── docs/                       # Documentation
 │   ├── PROJ-LAYOUT.md          #   This file

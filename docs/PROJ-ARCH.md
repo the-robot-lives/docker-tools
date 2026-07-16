@@ -71,5 +71,5 @@ from the environment (`.envrc.k8.dc` via direnv). An optional
 Part of the monorepo `utilities/` family installed together by the root
 `make install-utilities`. `deploy-service` (infra-tools) drives the full
 image → registry → Helm values → `helm-upgrade` pipeline; `docker-push
---update-helm`/`--release` covers the values-bump step standalone. Helm charts
+--release` covers the values-bump step standalone. Helm charts
 themselves live in the upstream `noizu-infra` repo.
