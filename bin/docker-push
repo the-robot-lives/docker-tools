@@ -27,6 +27,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8_LIB_DIR="${K8_LIB_DIR:-${HOME}/.local/share/k8-lib}"
 INFRA_ROOT="${INFRA_ROOT:-$(pwd)}"
 
+_K8_BASH_RUNTIME="${K8_LIB_DIR}/bin/bash-runtime.sh"
+[[ -f "$_K8_BASH_RUNTIME" ]] || _K8_BASH_RUNTIME="${SCRIPT_DIR}/../../k8-lib/bin/bash-runtime.sh"
+[[ -f "$_K8_BASH_RUNTIME" ]] && source "$_K8_BASH_RUNTIME"
+if declare -F _k8_require_bash4 >/dev/null; then
+  _k8_require_bash4 "$0" "$@"
+elif [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+  echo "ERROR: docker-push requires Bash 4+; macOS /bin/bash 3.2 is not supported." >&2
+  exit 2
+fi
+unset _K8_BASH_RUNTIME
+
 # Pre-parse --config (must resolve before k8-lib sourcing)
 for _k8_arg in "$@"; do
   case "$_k8_arg" in
@@ -43,6 +54,11 @@ unset _k8_arg _k8_prev
 source "$K8_LIB_DIR/bin/docker-config.sh"
 source "$K8_LIB_DIR/bin/assist.sh"
 _k8_check_assist "$0" "$@"
+
+usage() {
+  sed -n '3,/^# ===/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//' >&2
+  exit "${1:-0}"
+}
 
 # --- Toggle-list helper ------------------------------------------------------
 # Usage: _toggle_input SELECTED_ARRAY_NAME MAX_COUNT
@@ -129,6 +145,7 @@ while [[ $# -gt 0 ]]; do
     --config=*) ;;
     --include=*) INCLUDE_LIST="${1#--include=}" ;;
     --include)   INCLUDE_LIST="$2"; shift ;;
+    -h|--help) usage 0 ;;
     -*)        ;; # ignore other flags
     *)
       if [[ -z "$TARGET" ]]; then
