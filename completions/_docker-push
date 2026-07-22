@@ -1,0 +1,56 @@
+#compdef docker-push
+# zsh completion for docker-push.
+#
+# Install (either works):
+#   1. Copy onto $fpath as `_docker-push` (done by `make install-completions`),
+#      then ensure the directory is in fpath before compinit runs.
+#   2. Source this file directly from .zshrc (after compinit).
+
+_docker-push_image_keys() {
+  local -a keys
+  local f="$PWD"
+  # Walk up from $PWD to the repo root (first dir holding .infra-config.yaml).
+  # Guard: missing yq or config ⇒ keys stays empty ⇒ nothing emitted.
+  while [[ "$f" != "/" ]]; do
+    if [[ -f "$f/.infra-config.yaml" ]]; then
+      keys=(${(fu)"$(yq '.project.projects[].services[].name, .project.docker.images[].name' "$f/.infra-config.yaml" 2>/dev/null)"})
+      break
+    fi
+    f="${f%/*}"
+  done
+  _describe -t keys 'image key' keys
+}
+
+_docker-push() {
+  local curcontext="$curcontext" state line ret=1
+  typeset -A opt_args
+
+  _arguments -C \
+    '(- *)'{-h,--help}'[show help and exit]' \
+    '--dry-run[preview without making changes]' \
+    '--verbose[enable verbose output]' \
+    '--remote[remote mode]' \
+    '-up[force up]' \
+    '(-y --yes)'{-y,--yes}'[skip confirmation prompts]' \
+    '--headless[suppress interactive prompts]' \
+    '--all[push all images]' \
+    '--pick[interactive image picker]' \
+    '--no-zellij[suppress zellij session wrapper]' \
+    '--stage[set build env to stage]' \
+    '--prod[set build env to prod]' \
+    '--dev[set build env to dev]' \
+    '--env=[set build env]:env:(dev stage prod)' \
+    '--release[bump chart image tag after push]' \
+    '--config=[path to .infra-config.yaml]:config:_files' \
+    '--include=[comma-separated image-key list]:image keys:_docker-push_image_keys' \
+    '1:image-key:_docker-push_image_keys' && ret=0
+
+  return ret
+}
+
+# Dual-mode: autoloaded from fpath (#compdef) vs sourced from .zshrc.
+if [[ "${funcstack[1]}" == "_docker-push" ]]; then
+  _docker-push "$@"
+elif (( ${+functions[compdef]} )); then
+  compdef _docker-push docker-push
+fi
