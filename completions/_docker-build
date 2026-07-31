@@ -1,0 +1,64 @@
+#compdef docker-build
+# zsh completion for docker-build.
+#
+# Install (either works):
+#   1. Copy onto $fpath as `_docker-build` (done by `make install-completions`),
+#      then ensure the directory is in fpath before compinit runs.
+#   2. Source this file directly from .zshrc (after compinit).
+
+_docker-build_image_keys() {
+  local -a keys
+  local f="$PWD"
+  # Walk up from $PWD to the repo root (first dir holding .infra-config.yaml).
+  # Guard: missing yq or config ⇒ keys stays empty ⇒ nothing emitted.
+  while [[ "$f" != "/" ]]; do
+    if [[ -f "$f/.infra-config.yaml" ]]; then
+      keys=(${(fu)"$(yq '.project.projects[].services[].name, .project.docker.images[].name' "$f/.infra-config.yaml" 2>/dev/null)"})
+      break
+    fi
+    f="${f%/*}"
+  done
+  _describe -t keys 'image key' keys
+}
+
+_docker-build() {
+  local curcontext="$curcontext" state line ret=1
+  typeset -A opt_args
+
+  _arguments -C \
+    '(- *)'{-h,--help}'[show help and exit]' \
+    '(-v --verbose)'{-v,--verbose}'[enable verbose output]' \
+    '--silent[suppress non-essential output]' \
+    '--push[build and push]' \
+    '--dry-run[preview without making changes]' \
+    '-up[push shorthand passed through to docker-push]' \
+    '(-y --yes)'{-y,--yes}'[skip confirmation prompts]' \
+    '--all[build all images]' \
+    '--pick[interactive image picker]' \
+    '--dev[set build env to dev]' \
+    '--stage[set build env to stage]' \
+    '--prod[set build env to prod]' \
+    '--env=[set build env]:env:(dev stage prod)' \
+    '--no-buildx[disable buildx]' \
+    '--no-cache[build without Docker cache]' \
+    '--no-zellij[suppress zellij session wrapper]' \
+    '--release[bump chart image tag after push]' \
+    '--native[build for host arch only]' \
+    '--multiarch[build for multiple architectures]' \
+    '--platform=[target platforms]:platform:(linux/amd64 linux/arm64 linux/amd64,linux/arm64)' \
+    '--vsn=[override version tag]:vsn:' \
+    '--publish-chart[publish helm chart after push]' \
+    '--no-publish-chart[skip helm chart publish after push]' \
+    '--config=[path to .infra-config.yaml]:config:_files' \
+    '--include=[comma-separated image-key list]:image keys:_docker-build_image_keys' \
+    '1:image-key:_docker-build_image_keys' && ret=0
+
+  return ret
+}
+
+# Dual-mode: autoloaded from fpath (#compdef) vs sourced from .zshrc.
+if [[ "${funcstack[1]}" == "_docker-build" ]]; then
+  _docker-build "$@"
+elif (( ${+functions[compdef]} )); then
+  compdef _docker-build docker-build
+fi

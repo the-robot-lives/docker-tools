@@ -38,6 +38,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8_LIB_DIR="${K8_LIB_DIR:-${HOME}/.local/share/k8-lib}"
 INFRA_ROOT="${INFRA_ROOT:-$(pwd)}"
 
+_K8_BASH_RUNTIME="${K8_LIB_DIR}/bin/bash-runtime.sh"
+[[ -f "$_K8_BASH_RUNTIME" ]] || _K8_BASH_RUNTIME="${SCRIPT_DIR}/../../k8-lib/bin/bash-runtime.sh"
+[[ -f "$_K8_BASH_RUNTIME" ]] && source "$_K8_BASH_RUNTIME"
+if declare -F _k8_require_bash4 >/dev/null; then
+  _k8_require_bash4 "$0" "$@"
+elif [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+  echo "ERROR: docker-build requires Bash 4+; macOS /bin/bash 3.2 is not supported." >&2
+  exit 2
+fi
+unset _K8_BASH_RUNTIME
+
 # Pre-parse --config (must resolve before k8-lib sourcing)
 for _k8_arg in "$@"; do
   case "$_k8_arg" in
@@ -122,6 +133,7 @@ cat <<EOF
   ${BLU}Environment:${NC}
     K8_DOCKER_MULTIARCH=true/false          Default multiarch mode (.envrc.k8.dc)
     DOCKER_BUILD_QUIET_CONTAINERD_NUDGE=1   Silence the containerd-store nudge
+    DOCKER_BUILD_PANE_SHELL=/bin/zsh        Override shell used for zellij build panes
     DOCKER_YES=true                         Auto-confirm prompts
 
   ${BLU}Examples:${NC}
@@ -201,6 +213,22 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# =============================================================================
+# Infisical preflight — fail fast if push will need Infisical and it's broken
+# =============================================================================
+if $AUTO_PUSH && ! $FLAG_DRY_RUN; then
+  if _infisical_preflight; then
+    export _INFISICAL_PREFLIGHT_DONE=true
+    export INFISICAL_HOST API_TOKEN PROJECT_ID
+    export EKS_OPERATOR_CLIENT_ID EKS_OPERATOR_CLIENT_SECRET
+  else
+    echo ""
+    echo "   Infisical access is required for --push (version tagging)."
+    echo "   Fix credentials before building to avoid wasting build time."
+    exit 1
+  fi
+fi
 
 # =============================================================================
 # Platform resolution
@@ -852,8 +880,76 @@ for pt in "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"; do
   PANE_FLAGS+=" ${pt}"
 done
 
+_resolve_build_pane_shell() {
+  local candidate shell_name
+
+  candidate="${DOCKER_BUILD_PANE_SHELL:-}"
+
+  if [[ -z "$candidate" ]] && [[ -n "${PPID:-}" ]] && command -v ps &>/dev/null; then
+    candidate="$(ps -p "$PPID" -o comm= 2>/dev/null | sed 's/^[[:space:]-]*//; s/[[:space:]]*$//' | head -n 1 || true)"
+    if [[ -n "$candidate" ]]; then
+      shell_name="$(basename "$candidate")"
+      case "$shell_name" in
+        bash|zsh|fish|ksh|mksh|dash|sh) ;;
+        *) candidate="" ;;
+      esac
+    fi
+  fi
+
+  [[ -z "$candidate" ]] && candidate="${SHELL:-/bin/bash}"
+
+  if [[ "$candidate" == */* ]]; then
+    if [[ -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+    candidate="$(basename "$candidate")"
+  fi
+
+  if command -v "$candidate" &>/dev/null; then
+    command -v "$candidate"
+    return
+  fi
+
+  printf 'bash'
+}
+
+_kdl_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  printf '%s' "$s"
+}
+
+PANE_SHELL="$(_resolve_build_pane_shell)"
+PANE_SHELL_EXEC_FLAG="-c"
+PANE_SHELL_KDL="$(_kdl_escape "$PANE_SHELL")"
+PANE_SHELL_EXEC_FLAG_KDL="$(_kdl_escape "$PANE_SHELL_EXEC_FLAG")"
+DOCKER_BUILD_SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+
+_build_pane_shell_command() {
+  local image="$1"
+  local quoted_build quoted_image quoted_shell
+  printf -v quoted_build '%q' "$DOCKER_BUILD_SELF"
+  printf -v quoted_image '%q' "$image"
+  printf -v quoted_shell '%q' "$PANE_SHELL"
+  printf '%s %s%s; exec %s' "$quoted_build" "$quoted_image" "$PANE_FLAGS" "$quoted_shell"
+}
+
 # --- Zellij multi-build mode ------------------------------------------------
 if command -v zellij &>/dev/null && ! $NO_ZELLIJ && (( ${#TARGETS[@]} > 1 )); then
+  if [[ -n "${ZELLIJ:-}" || -n "${ZELLIJ_SESSION_NAME:-}" ]]; then
+    echo ""
+    echo "Adding ${#TARGETS[@]} build pane(s) to the current zellij tab..."
+
+    for image in "${TARGETS[@]}"; do
+      zellij action new-pane --name "$image" --cwd "$PWD" -- "$PANE_SHELL" "$PANE_SHELL_EXEC_FLAG" "$(_build_pane_shell_command "$image")"
+    done
+
+    exit 0
+  fi
+
   SESSION_NAME="build-$(date +%H%M%S)"
   layout_file="/tmp/docker-build-zj-$(head -c6 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c8).kdl"
 
@@ -861,9 +957,10 @@ if command -v zellij &>/dev/null && ! $NO_ZELLIJ && (( ${#TARGETS[@]} > 1 )); th
     echo "layout {"
     echo "  tab name=\"builds\" {"
     for image in "${TARGETS[@]}"; do
+      pane_command_kdl="$(_kdl_escape "$(_build_pane_shell_command "$image")")"
       echo "    pane name=\"${image}\" {"
-      echo "      command \"bash\""
-      echo "      args \"-c\" \"docker-build ${image}${PANE_FLAGS}; exec bash\""
+      echo "      command \"${PANE_SHELL_KDL}\""
+      echo "      args \"${PANE_SHELL_EXEC_FLAG_KDL}\" \"${pane_command_kdl}\""
       echo "    }"
     done
     echo "  }"

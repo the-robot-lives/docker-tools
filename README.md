@@ -14,6 +14,7 @@ Installs:
 |---------|---------|
 | `docker-build` | Build one or more configured Docker image targets |
 | `docker-push` | Push a previously built image or a selected configured target |
+| `docker-sandbox` | Run an app sandbox with frontend/backend dev servers pointed at forwarded production services |
 | `docker-qemu11` | Register newer QEMU binfmt support for amd64 emulation on arm hosts |
 
 ## Prerequisites
@@ -158,6 +159,31 @@ docker-push backend
 docker-push --include backend,worker
 docker-push --all
 ```
+
+## Live Sandbox
+
+`docker-sandbox` runs the app's `docker-compose.sandbox.yaml` stack and points
+the sandbox, backend, and migrations containers at production services through
+host port-forwards. It discovers project paths, Docker targets, and database
+ports from the same `infra-config.yaml` used by `docker-build`.
+
+```bash
+# Preview commands without starting kubectl or Docker.
+docker-sandbox therobotplans.com --dry-run
+
+# Start foreground sandbox with DB/Redis port-forwards.
+docker-sandbox therobotplans.com up
+
+# Detached mode keeps port-forward PIDs in .docker-state/sandbox/.
+docker-sandbox therobotplans.com up -d
+docker-sandbox therobotplans.com logs
+docker-sandbox therobotplans.com down
+```
+
+The generated compose override sets `DB_HOST`, `DATABASE_HOST`, `PGHOST`, and
+their port equivalents to `host.docker.internal`, so containers reach the
+forwarded services on the host. If auto-detection cannot pick the database,
+pass `--db <key>` using a key from `.infra-config.yaml` under `databases:`.
 
 ## How Target Resolution Works
 

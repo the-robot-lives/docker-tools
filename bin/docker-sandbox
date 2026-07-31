@@ -1,0 +1,565 @@
+#!/usr/bin/env bash
+# =============================================================================
+# docker-sandbox — Run a live frontend/backend sandbox against forwarded services.
+#
+# Usage:
+#   docker-sandbox therobotplans.com --dry-run
+#   docker-sandbox therobotplans.com up
+#   docker-sandbox therobotplans.com up -d
+#   docker-sandbox therobotplans.com logs
+#   docker-sandbox therobotplans.com down
+#
+# The command discovers project metadata from infra-config.yaml, starts local
+# kubectl port-forwards for the selected production database/services, generates
+# a temporary docker compose override that points containers at
+# host.docker.internal, then runs the app's docker-compose.sandbox.yaml stack.
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+K8_LIB_DIR="${K8_LIB_DIR:-${HOME}/.local/share/k8-lib}"
+INFRA_ROOT="${INFRA_ROOT:-$(pwd)}"
+
+_K8_BASH_RUNTIME="${K8_LIB_DIR}/bin/bash-runtime.sh"
+[[ -f "$_K8_BASH_RUNTIME" ]] || _K8_BASH_RUNTIME="${SCRIPT_DIR}/../../k8-lib/bin/bash-runtime.sh"
+[[ -f "$_K8_BASH_RUNTIME" ]] && source "$_K8_BASH_RUNTIME"
+if declare -F _k8_require_bash4 >/dev/null; then
+  _k8_require_bash4 "$0" "$@"
+elif [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+  echo "ERROR: docker-sandbox requires Bash 4+; macOS /bin/bash 3.2 is not supported." >&2
+  exit 2
+fi
+unset _K8_BASH_RUNTIME
+
+for _k8_arg in "$@"; do
+  case "$_k8_arg" in
+    --config=*) export K8_CONFIG="${_k8_arg#--config=}" ;;
+  esac
+done
+_k8_prev=""
+for _k8_arg in "$@"; do
+  [[ "$_k8_prev" == "--config" ]] && export K8_CONFIG="$_k8_arg"
+  _k8_prev="$_k8_arg"
+done
+unset _k8_arg _k8_prev
+
+source "${K8_LIB_DIR}/bin/docker-config.sh"
+
+usage() {
+  cat <<EOF
+docker-sandbox — run frontend/backend sandbox containers against forwarded prod services
+
+Usage:
+  docker-sandbox [flags] [project] [up|down|logs|shell|build|ps]
+
+Projects:
+  Project may be a configured domain (therobotplans.com), a docker target
+  (therobotplans.com/sandbox), or omitted when running inside a configured
+  project path.
+
+Flags:
+  -d, --detach           Run compose up in detached mode
+  --dry-run              Print kubectl/docker commands without executing
+  --no-forward           Do not start kubectl port-forwards
+  --db KEY               Database key from .infra-config.yaml (auto-detected)
+  --redis-port PORT      Local Redis forward port when the DB config has redis_service
+  --frontend-port PORT   Host frontend port for sandbox compose (default 3000)
+  --backend-port PORT    Host backend port for sandbox compose (default 4000)
+  --smb-port PORT        Host SMB port for sandbox compose (default 445)
+  --context NAME         kubectl context override
+  --namespace NAME       kubectl namespace override for DB forwards
+  --config PATH          k8-lib config path
+  -h, --help             Show help
+
+Examples:
+  docker-sandbox therobotplans.com --dry-run
+  docker-sandbox therobotplans.com up -d
+  docker-sandbox therobotplans.com logs
+  docker-sandbox therobotplans.com down
+EOF
+}
+
+ACTION="up"
+TARGET=""
+DETACH=false
+DRY_RUN=false
+NO_FORWARD=false
+DB_KEY=""
+REDIS_LOCAL_PORT=""
+FRONTEND_PORT="${SANDBOX_FRONTEND_PORT:-3000}"
+BACKEND_PORT="${SANDBOX_BACKEND_PORT:-4000}"
+SMB_PORT="${SANDBOX_SMB_PORT:-445}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-${K8_KUBE_CONTEXT:-}}"
+KUBE_NAMESPACE_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    up|down|logs|shell|build|ps)
+      ACTION="$1"
+      ;;
+    -d|--detach)
+      DETACH=true
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    --no-forward)
+      NO_FORWARD=true
+      ;;
+    --db)
+      DB_KEY="$2"; shift
+      ;;
+    --db=*)
+      DB_KEY="${1#--db=}"
+      ;;
+    --redis-port)
+      REDIS_LOCAL_PORT="$2"; shift
+      ;;
+    --redis-port=*)
+      REDIS_LOCAL_PORT="${1#--redis-port=}"
+      ;;
+    --frontend-port)
+      FRONTEND_PORT="$2"; shift
+      ;;
+    --frontend-port=*)
+      FRONTEND_PORT="${1#--frontend-port=}"
+      ;;
+    --backend-port)
+      BACKEND_PORT="$2"; shift
+      ;;
+    --backend-port=*)
+      BACKEND_PORT="${1#--backend-port=}"
+      ;;
+    --smb-port)
+      SMB_PORT="$2"; shift
+      ;;
+    --smb-port=*)
+      SMB_PORT="${1#--smb-port=}"
+      ;;
+    --context)
+      KUBE_CONTEXT="$2"; shift
+      ;;
+    --context=*)
+      KUBE_CONTEXT="${1#--context=}"
+      ;;
+    --namespace)
+      KUBE_NAMESPACE_OVERRIDE="$2"; shift
+      ;;
+    --namespace=*)
+      KUBE_NAMESPACE_OVERRIDE="${1#--namespace=}"
+      ;;
+    --config)
+      shift
+      ;;
+    --config=*)
+      ;;
+    -h|--help)
+      usage; exit 0
+      ;;
+    -*)
+      echo "ERROR: unknown flag: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ -z "$TARGET" ]]; then
+        TARGET="$1"
+      else
+        echo "ERROR: unexpected argument: $1" >&2
+        usage >&2
+        exit 2
+      fi
+      ;;
+  esac
+  shift
+done
+
+YAML="${_K8_MERGED_CONFIG:-${_K8_CONFIG_PATH:-}}"
+[[ -f "$YAML" ]] || { echo "ERROR: could not resolve infra config; set K8_CONFIG or run inside the repo." >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required." >&2; exit 1; }
+
+project_slug() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+sanitize_env_name() {
+  echo "$1" | tr '[:lower:].-' '[:upper:]__' | sed -E 's/[^A-Z0-9_]+/_/g'
+}
+
+domain_exists() {
+  yq eval -e ".project.projects[] | select(.domain == \"$1\") | .domain" "$YAML" >/dev/null 2>&1
+}
+
+db_exists() {
+  yq eval -e ".databases.\"$1\"" "$YAML" >/dev/null 2>&1
+}
+
+domain_for_target() {
+  local target="$1"
+  if [[ -n "$target" ]]; then
+    if domain_exists "$target"; then
+      echo "$target"; return 0
+    fi
+    if [[ "$target" == */* ]]; then
+      local domain_part="${target%%/*}"
+      if domain_exists "$domain_part"; then
+        echo "$domain_part"; return 0
+      fi
+    fi
+    if resolved="$(normalize_repo_name "$target" 2>/dev/null)"; then
+      local domain_part="${resolved%%/*}"
+      if domain_exists "$domain_part"; then
+        echo "$domain_part"; return 0
+      fi
+    fi
+  fi
+
+  local cwd
+  cwd="$(pwd -P)"
+  local best_domain="" best_len=0
+  while IFS=$'\t' read -r domain base_path; do
+    [[ -z "$domain" || -z "$base_path" || "$base_path" == "null" ]] && continue
+    local abs_base="${INFRA_ROOT%/}/${base_path}"
+    if [[ "$cwd" == "$abs_base" || "$cwd" == "$abs_base"/* ]]; then
+      local len=${#abs_base}
+      if (( len > best_len )); then
+        best_len=$len
+        best_domain="$domain"
+      fi
+    fi
+  done < <(yq eval '.project.projects[] | [.domain, .base_path] | @tsv' "$YAML")
+
+  [[ -n "$best_domain" ]] && { echo "$best_domain"; return 0; }
+  return 1
+}
+
+project_base_path() {
+  yq eval ".project.projects[] | select(.domain == \"$1\") | .base_path" "$YAML"
+}
+
+project_has_service() {
+  yq eval -e ".project.projects[] | select(.domain == \"$1\") | .services[]? | select(.name == \"$2\")" "$YAML" >/dev/null 2>&1
+}
+
+compose_dir_for_project() {
+  local base_path="$1"
+  local abs_base="${INFRA_ROOT%/}/${base_path}"
+  local candidate
+  for candidate in "$abs_base" "$abs_base/app" "$abs_base/apps/backend"; do
+    if [[ -f "$candidate/docker-compose.yaml" && -f "$candidate/docker-compose.sandbox.yaml" ]]; then
+      echo "$candidate"; return 0
+    fi
+    if [[ -f "$candidate/docker-compose.yml" && -f "$candidate/docker-compose.sandbox.yaml" ]]; then
+      echo "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+base_compose_file() {
+  local dir="$1"
+  if [[ -f "$dir/docker-compose.yaml" ]]; then
+    echo "docker-compose.yaml"
+  else
+    echo "docker-compose.yml"
+  fi
+}
+
+require_compose_env_files() {
+  local dir="$1"
+  local missing=()
+  declare -A missing_seen=()
+  local file
+  local env_path
+
+  for file in docker-compose.yaml docker-compose.yml docker-compose.sandbox.yaml; do
+    [[ -f "$dir/$file" ]] || continue
+    if grep -Eq 'env_file:.*(^|[[:space:]])\.env($|[[:space:]])|-[[:space:]]*\.env[[:space:]]*$' "$dir/$file"; then
+      env_path=".env"
+      [[ -f "$dir/$env_path" || -n "${missing_seen[$env_path]+x}" ]] || { missing+=("$env_path"); missing_seen["$env_path"]=1; }
+    fi
+    if grep -Eq 'env_file:.*backend/\.env|-[[:space:]]*backend/\.env[[:space:]]*$' "$dir/$file"; then
+      env_path="backend/.env"
+      [[ -f "$dir/$env_path" || -n "${missing_seen[$env_path]+x}" ]] || { missing+=("$env_path"); missing_seen["$env_path"]=1; }
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "ERROR: missing sandbox env file(s) in $dir: ${missing[*]}" >&2
+    echo "       Run the app's env/init step first, or provide the files before docker-sandbox up." >&2
+    echo "       docker-sandbox forwards production services; it does not fetch app secrets." >&2
+    exit 1
+  fi
+}
+
+db_key_for_project() {
+  local domain="$1" base_path="$2"
+  [[ -n "$DB_KEY" ]] && { echo "$DB_KEY"; return 0; }
+
+  if db_exists "$domain"; then
+    echo "$domain"; return 0
+  fi
+
+  local first_label="${domain%%.*}"
+  if db_exists "$first_label"; then
+    echo "$first_label"; return 0
+  fi
+
+  local stripped="${domain%.com}"
+  stripped="${stripped//./}"
+  stripped="${stripped//-/}"
+  if db_exists "$stripped"; then
+    echo "$stripped"; return 0
+  fi
+
+  local match
+  while IFS=$'\t' read -r key changelog_dir; do
+    [[ -z "$key" || "$key" == "null" || "$key" == *-test ]] && continue
+    [[ -z "$changelog_dir" || "$changelog_dir" == "null" ]] && continue
+    if [[ "$changelog_dir" == "$base_path" || "$changelog_dir" == "$base_path"/* ]]; then
+      echo "$key"; return 0
+    fi
+  done < <(yq eval '.databases | to_entries[] | [.key, (.value.changelog_dir // "")] | @tsv' "$YAML" 2>/dev/null || true)
+
+  return 1
+}
+
+port_open() {
+  local port="$1"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z 127.0.0.1 "$port" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+wait_for_port() {
+  local port="$1" label="$2"
+  local attempt
+  for attempt in {1..30}; do
+    if port_open "$port"; then
+      echo "ok: $label forwarded on localhost:$port"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "warn: $label did not become reachable on localhost:$port yet; continuing." >&2
+}
+
+PF_PIDS=()
+PF_PID_FILE=""
+
+cleanup_forwards() {
+  local pid
+  for pid in "${PF_PIDS[@]:-}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+}
+
+kubectl_base() {
+  if [[ -n "$KUBE_CONTEXT" ]]; then
+    printf '%s\n' kubectl --context "$KUBE_CONTEXT"
+  else
+    printf '%s\n' kubectl
+  fi
+}
+
+start_forward() {
+  local label="$1" namespace="$2" resource="$3" local_port="$4" remote_port="$5"
+  [[ -n "$KUBE_NAMESPACE_OVERRIDE" ]] && namespace="$KUBE_NAMESPACE_OVERRIDE"
+
+  local cmd
+  if [[ -n "$KUBE_CONTEXT" ]]; then
+    cmd=(kubectl --context "$KUBE_CONTEXT" -n "$namespace" port-forward "$resource" "${local_port}:${remote_port}")
+  else
+    cmd=(kubectl -n "$namespace" port-forward "$resource" "${local_port}:${remote_port}")
+  fi
+
+  if $DRY_RUN; then
+    printf 'dry-run: '
+    printf '%q ' "${cmd[@]}"
+    printf '\n'
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$PF_PID_FILE")"
+  "${cmd[@]}" >"${PF_PID_FILE}.${label}.log" 2>&1 &
+  local pid=$!
+  PF_PIDS+=("$pid")
+  echo "$pid" >> "$PF_PID_FILE"
+  wait_for_port "$local_port" "$label"
+}
+
+write_override() {
+  local file="$1" db_host="$2" db_port="$3" redis_port="${4:-}"
+  local redis_block=""
+  if [[ -n "$redis_port" ]]; then
+    redis_block=$(cat <<EOF
+      REDIS_HOST: "host.docker.internal"
+      REDIS_PORT: "${redis_port}"
+EOF
+)
+  fi
+
+  cat > "$file" <<EOF
+services:
+  sandbox:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DB_HOST: "${db_host}"
+      DATABASE_HOST: "${db_host}"
+      PGHOST: "${db_host}"
+      DB_PORT: "${db_port}"
+      DATABASE_PORT: "${db_port}"
+      PGPORT: "${db_port}"
+${redis_block}
+
+  backend:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DB_HOST: "${db_host}"
+      DATABASE_HOST: "${db_host}"
+      PGHOST: "${db_host}"
+      DB_PORT: "${db_port}"
+      DATABASE_PORT: "${db_port}"
+      PGPORT: "${db_port}"
+${redis_block}
+
+  migrations:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DB_HOST: "${db_host}"
+      DATABASE_HOST: "${db_host}"
+      PGHOST: "${db_host}"
+      DB_PORT: "${db_port}"
+      DATABASE_PORT: "${db_port}"
+      PGPORT: "${db_port}"
+${redis_block}
+EOF
+}
+
+DOMAIN="$(domain_for_target "$TARGET" || true)"
+[[ -n "$DOMAIN" ]] || { echo "ERROR: could not resolve project. Pass a configured domain or run inside one." >&2; exit 1; }
+
+BASE_PATH="$(project_base_path "$DOMAIN")"
+COMPOSE_DIR="$(compose_dir_for_project "$BASE_PATH" || true)"
+[[ -n "$COMPOSE_DIR" ]] || { echo "ERROR: $DOMAIN does not have docker-compose.sandbox.yaml under $BASE_PATH or $BASE_PATH/app." >&2; exit 1; }
+
+BASE_COMPOSE="$(base_compose_file "$COMPOSE_DIR")"
+COMPOSE_PROJECT="sandbox-$(project_slug "$DOMAIN")"
+STATE_DIR="${DOCKER_STATE_DIR}/sandbox"
+PF_PID_FILE="${STATE_DIR}/${COMPOSE_PROJECT}.pids"
+OVERRIDE_DIR="${INFRA_ROOT%/}/.tmp/docker-sandbox"
+OVERRIDE_FILE="${OVERRIDE_DIR}/${COMPOSE_PROJECT}.forwarding.yaml"
+
+DB_PORT=""
+REDIS_PORT=""
+
+if [[ "$ACTION" == "down" ]]; then
+  if $DRY_RUN; then
+    echo "dry-run: docker compose -p $COMPOSE_PROJECT -f $BASE_COMPOSE -f docker-compose.sandbox.yaml down"
+  else
+    (cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$BASE_COMPOSE" -f docker-compose.sandbox.yaml down)
+    if [[ -f "$PF_PID_FILE" ]]; then
+      while read -r pid; do
+        [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
+      done < "$PF_PID_FILE"
+      rm -f "$PF_PID_FILE" "$PF_PID_FILE".*.log
+    fi
+  fi
+  exit 0
+fi
+
+if ! $NO_FORWARD; then
+  RESOLVED_DB_KEY="$(db_key_for_project "$DOMAIN" "$BASE_PATH" || true)"
+  if [[ -z "$RESOLVED_DB_KEY" ]]; then
+    echo "warn: no database mapping found for $DOMAIN; use --db KEY or --no-forward." >&2
+  else
+    db_exists "$RESOLVED_DB_KEY" || { echo "ERROR: database key not found: $RESOLVED_DB_KEY" >&2; exit 1; }
+    DB_NAMESPACE="$(yq eval ".databases.\"$RESOLVED_DB_KEY\".namespace // \"apps\"" "$YAML")"
+    DB_RESOURCE="$(yq eval ".databases.\"$RESOLVED_DB_KEY\".service // \"\"" "$YAML")"
+    DB_REMOTE_PORT="$(yq eval ".databases.\"$RESOLVED_DB_KEY\".remote_port // 5432" "$YAML")"
+    DB_PORT="$(yq eval ".databases.\"$RESOLVED_DB_KEY\".local_port // \"\"" "$YAML")"
+    [[ -z "$DB_RESOURCE" || "$DB_RESOURCE" == "null" ]] && { echo "ERROR: database $RESOLVED_DB_KEY has no service." >&2; exit 1; }
+    [[ -z "$DB_PORT" || "$DB_PORT" == "null" ]] && DB_PORT="$DB_REMOTE_PORT"
+
+    mkdir -p "$STATE_DIR"
+    : > "$PF_PID_FILE"
+    start_forward "db" "$DB_NAMESPACE" "$DB_RESOURCE" "$DB_PORT" "$DB_REMOTE_PORT"
+
+    REDIS_RESOURCE="$(yq eval ".databases.\"$RESOLVED_DB_KEY\".redis_service // \"\"" "$YAML")"
+    if [[ -n "$REDIS_RESOURCE" && "$REDIS_RESOURCE" != "null" ]]; then
+      REDIS_REMOTE_PORT="$(yq eval ".databases.\"$RESOLVED_DB_KEY\".redis_remote_port // 6379" "$YAML")"
+      REDIS_PORT="${REDIS_LOCAL_PORT:-$(yq eval ".databases.\"$RESOLVED_DB_KEY\".redis_local_port // \"\"" "$YAML")}"
+      if [[ -z "$REDIS_PORT" || "$REDIS_PORT" == "null" ]]; then
+        if (( DB_PORT + 10000 <= 65535 )); then
+          REDIS_PORT=$((DB_PORT + 10000))
+        else
+          REDIS_PORT=63790
+        fi
+      fi
+      start_forward "redis" "$DB_NAMESPACE" "$REDIS_RESOURCE" "$REDIS_PORT" "$REDIS_REMOTE_PORT"
+    fi
+  fi
+fi
+
+mkdir -p "$OVERRIDE_DIR"
+if [[ -n "$DB_PORT" ]]; then
+  write_override "$OVERRIDE_FILE" "host.docker.internal" "$DB_PORT" "$REDIS_PORT"
+else
+  write_override "$OVERRIDE_FILE" "host.docker.internal" "5432" ""
+fi
+
+COMPOSE_FILES=(-f "$BASE_COMPOSE" -f docker-compose.sandbox.yaml -f "$OVERRIDE_FILE")
+export SANDBOX_FRONTEND_PORT="$FRONTEND_PORT"
+export SANDBOX_BACKEND_PORT="$BACKEND_PORT"
+export SANDBOX_SMB_PORT="$SMB_PORT"
+
+case "$ACTION" in
+  up)
+    $DRY_RUN || require_compose_env_files "$COMPOSE_DIR"
+    if ! $DETACH && ! $DRY_RUN; then
+      trap cleanup_forwards EXIT INT TERM
+    fi
+    COMPOSE_ARGS=(up)
+    $DETACH && COMPOSE_ARGS+=(-d)
+    ;;
+  build)
+    $DRY_RUN || require_compose_env_files "$COMPOSE_DIR"
+    COMPOSE_ARGS=(build sandbox)
+    ;;
+  logs)
+    COMPOSE_ARGS=(logs -f sandbox)
+    ;;
+  shell)
+    COMPOSE_ARGS=(exec sandbox bash)
+    ;;
+  ps)
+    COMPOSE_ARGS=(ps)
+    ;;
+  *)
+    echo "ERROR: unsupported action: $ACTION" >&2
+    exit 2
+    ;;
+esac
+
+if $DRY_RUN; then
+  echo "dry-run: project=$DOMAIN compose_dir=$COMPOSE_DIR"
+  printf 'dry-run: SANDBOX_FRONTEND_PORT=%q SANDBOX_BACKEND_PORT=%q SANDBOX_SMB_PORT=%q ' "$FRONTEND_PORT" "$BACKEND_PORT" "$SMB_PORT"
+  printf 'docker compose -p %q ' "$COMPOSE_PROJECT"
+  printf '%q ' "${COMPOSE_FILES[@]}" "${COMPOSE_ARGS[@]}"
+  printf '\n'
+  echo "dry-run: generated override would be $OVERRIDE_FILE"
+  exit 0
+fi
+
+cd "$COMPOSE_DIR"
+docker compose -p "$COMPOSE_PROJECT" "${COMPOSE_FILES[@]}" "${COMPOSE_ARGS[@]}"
+
+if $DETACH && [[ -f "$PF_PID_FILE" ]]; then
+  echo "sandbox forwards recorded in $PF_PID_FILE"
+  echo "stop with: docker-sandbox $DOMAIN down"
+fi
