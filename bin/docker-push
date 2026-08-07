@@ -550,6 +550,19 @@ if [[ "$BUILD_ENV" == "prod" ]]; then
   CURRENT_PATCH=$(_fetch_secret "$VERSION_KEY")
 
   if [[ -z "$CURRENT_PATCH" || "$CURRENT_PATCH" == "null" ]]; then
+    # Counter genuinely missing — seed it = 0 now (Infisical POST auto-creates) so the
+    # later write is an update, and so a real Infisical failure surfaces here, early,
+    # before retag/push. The sanitized key from docker-vsn.sh is what makes this succeed.
+    if ! $DRY_RUN; then
+      _seed_http=$(_update_secret "$VERSION_KEY" "0")
+      if [[ "$_seed_http" != "200" && "$_seed_http" != "201" ]]; then
+        echo "❌  Failed to seed ${VERSION_KEY} in Infisical (HTTP ${_seed_http})"
+        echo "   Fix Infisical access or manually set ${VERSIONS_PATH}/${VERSION_KEY} = 0, then retry."
+        exit 1
+      fi
+      echo "  ✨  Seeded ${VERSION_KEY} = 0 (first release track)"
+    fi
+    CURRENT_PATCH=0
     NEXT_PATCH=0
     echo ""
     echo "⚠️  v${VSN_MAJOR}.${VSN_MINOR} not yet released for ${IMAGE_KEY}"
