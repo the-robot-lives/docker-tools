@@ -84,6 +84,21 @@ fail()    { echo -e "  ${RED}❌ $1${NC}"; }
 info()    { echo -e "  ${CYN}ℹ️  $1${NC}"; }
 die()     { echo -e "\n${RED}❌ $1${NC}\n"; exit 1; }
 
+# Invoke docker-push with this process's Bash 4+ interpreter.
+# `#!/usr/bin/env bash` resolves to macOS /bin/bash 3.2; if docker-build
+# already re-exec'd, a leftover _K8_BASH4_REEXECED would skip the child's
+# own re-exec and exit 2.
+_run_docker_push() {
+  local push_bin
+  push_bin="$(command -v docker-push)"
+  [[ -n "$push_bin" ]] || die "docker-push not found in PATH"
+  if [[ -n "${BASH:-}" && -x "$BASH" ]]; then
+    "$BASH" "$push_bin" "$@"
+  else
+    command docker-push "$@"
+  fi
+}
+
 # --- Log directory -----------------------------------------------------------
 LOG_DIR="${INFRA_ROOT}/.tmp/docker-build-logs"
 mkdir -p "$LOG_DIR"
@@ -826,7 +841,7 @@ if [[ ${#TARGETS[@]} -eq 1 ]]; then
     # and attach :v<M>.<m>.N[-env] via `buildx imagetools create`.
     info "Multi-arch manifest pushed to ${REGISTRY}"
     echo ""
-    docker-push --remote "$IMAGE" "${_BUILT_VSN:-}" \
+    _run_docker_push --remote "$IMAGE" "${_BUILT_VSN:-}" \
       "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
 
   elif $AUTO_PUSH; then
@@ -834,7 +849,7 @@ if [[ ${#TARGETS[@]} -eq 1 ]]; then
     # Hand off in --remote mode with the edge VSN.
     info "Single-arch manifest pushed to ${REGISTRY}"
     echo ""
-    docker-push --remote "$IMAGE" "${_BUILT_VSN:-}" \
+    _run_docker_push --remote "$IMAGE" "${_BUILT_VSN:-}" \
       "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
 
   elif ! $SILENT; then
@@ -1043,7 +1058,7 @@ if (( ${#SUCCEEDED[@]} > 0 )); then
     echo ""
     for image in "${SUCCEEDED[@]}"; do
       echo "--- Pushing ${image} ---"
-      docker-push "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
+      _run_docker_push "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
         "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
     done
   elif $ASKED_UPFRONT; then
@@ -1055,7 +1070,7 @@ if (( ${#SUCCEEDED[@]} > 0 )); then
     if _confirm "Push ${#SUCCEEDED[@]} successful build(s)?"; then
       for image in "${SUCCEEDED[@]}"; do
         echo "--- Pushing ${image} ---"
-        docker-push "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
+        _run_docker_push "${_push_flags[@]+"${_push_flags[@]}"}" "$image" \
           "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"
       done
     else
