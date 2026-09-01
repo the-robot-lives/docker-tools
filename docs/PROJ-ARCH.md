@@ -55,6 +55,8 @@ graph TB
 | `Makefile` | `make install` copies `bin/*` to `$INSTALL_DIR` (default `~/.local/bin`); `compile`/`test` are no-ops |
 | `.docker-state/` (at project root, runtime) | Build/push handoff state: `last`, `shadow`, `builds` (unpushed queue, cap 10), `pushes` (history, cap 10) |
 
+→ *Components ↔ directories: see [PROJ-LAYOUT.md](PROJ-LAYOUT.md); data/config schema: see [PROJ-SCHEMA.md](PROJ-SCHEMA.md)*
+
 ## Configuration Flow
 
 Targets come from `infra-config.yaml`: `project.docker.images[]` for flat
