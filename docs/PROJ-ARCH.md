@@ -3,11 +3,14 @@
 ## Overview
 
 `docker-utils` is a terminal utility package providing the Docker image
-build/push layer of the Noizu k8s deployment toolchain. Three bash executables
-in `bin/` (`docker-build`, `docker-push`, `docker-qemu11`) read image targets
-declared in the merged `infra-config.yaml` `project:` section, build them with
-BuildKit/buildx (multi-arch by default when `K8_DOCKER_MULTIARCH=true`), and
-push them to `$K8_DOCKER_REGISTRY` with Infisical-resolved patch versioning.
+build/push/sandbox layer of the Noizu k8s deployment toolchain. Four bash
+executables in `bin/` (`docker-build`, `docker-push`, `docker-sandbox`,
+`docker-qemu11`) read image targets declared in the merged `infra-config.yaml`
+`project:` section, build them with BuildKit/buildx (multi-arch by default when
+`K8_DOCKER_MULTIARCH=true`), and push them to `$K8_DOCKER_REGISTRY` with
+Infisical-resolved patch versioning. `docker-sandbox` reuses the same config
+resolution to run live frontend/backend sandbox stacks against kubectl-forwarded
+production services.
 
 The scripts are installed to `~/.local/bin` via `make install` (or the repo-root
 `make install-utilities`) and depend at runtime on the shared **k8-lib** shell
@@ -35,14 +38,19 @@ graph TB
     DS -->|orchestrates| DP
     STATE[.docker-state/<br/>last · shadow · builds · pushes] <--> DB
     STATE <--> DP
+    CFG --> DS[bin/docker-sandbox]
+    LIB --> DS
+    PF[kubectl port-forward<br/>prod DB / services] --> DS
+    DS -->|generated compose override<br/>→ host.docker.internal| SB[sandbox compose stack<br/>docker-compose.sandbox.yaml]
 ```
 
 ## Core Components
 
 | Component | Purpose |
 |-----------|---------|
-| `bin/docker-build` (~1057 loc) | Resolve targets from config (flat, composite `<domain>/<service>`, globs, `--pick`), build via buildx; parallel multi-build in zellij panes or background jobs; `--native`/`--multiarch`/`--platform`; optional `--push`/`--release` passthrough |
-| `bin/docker-push` (~1088 loc) | Resolve next patch version via Infisical (prod: `v{MAJ}.{MIN}.{PATCH}`; non-prod: `-{env}.{SUB}` sub-versions), retag, push; `--release` bumps helm values tag; `--headless` for agents; zellij fan-out for `--all` |
+| `bin/docker-build` (~1083 loc) | Resolve targets from config (flat, composite `<domain>/<service>`, globs, `--pick`), build via buildx; parallel multi-build in zellij panes or background jobs; `--native`/`--multiarch`/`--platform`; optional `--push`/`--release` passthrough |
+| `bin/docker-push` (~1118 loc) | Resolve next patch version via Infisical (prod: `v{MAJ}.{MIN}.{PATCH}`; non-prod: `-{env}.{SUB}` sub-versions), retag, push; `--release` bumps helm values tag; `--headless` for agents; zellij fan-out for `--all` |
+| `bin/docker-sandbox` (~565 loc) | Live sandbox: discovers project/docker targets/DB keys from `infra-config.yaml`, starts kubectl port-forwards, generates a compose override pointing containers at `host.docker.internal`, runs the app's `docker-compose.sandbox.yaml` stack; `--dry-run`/`up -d`/`logs`/`down` |
 | `bin/docker-qemu11` (~71 loc) | Register Debian-unstable QEMU 11.x binfmt (privileged) so amd64-on-arm64 Elixir/BEAM builds work when `tonistiigi/binfmt` lags; rerun after Docker VM restarts |
 | `Makefile` | `make install` copies `bin/*` to `$INSTALL_DIR` (default `~/.local/bin`); `compile`/`test` are no-ops |
 | `.docker-state/` (at project root, runtime) | Build/push handoff state: `last`, `shadow`, `builds` (unpushed queue, cap 10), `pushes` (history, cap 10) |
@@ -65,6 +73,7 @@ from the environment (`.envrc.k8.dc` via direnv). An optional
 - **zellij with graceful fallback**: multi-target work fans out into zellij panes when available, otherwise background jobs with log files (`.tmp/docker-build-logs/`); `--no-zellij`/`--headless` keep it agent-safe.
 - **Build/push split with state files**: `docker-build` records builds to `.docker-state/`; `docker-push` consumes them, so push (and Helm tag bump via `--release`) can happen later or from another invocation.
 - **QEMU registration kept separate**: `docker-qemu11` needs `--privileged` and is transient across VM restarts, so it is not folded into `docker-build`.
+- **Sandbox forwards, never fetches**: `docker-sandbox` tunnels production services to the host and generates a compose override; it deliberately does not resolve or ship app secrets — the app's own env/init step must have run first (Bash 4+ enforced).
 
 ## Ecosystem Fit
 
