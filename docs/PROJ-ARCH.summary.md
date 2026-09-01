@@ -2,8 +2,8 @@
 
 ## Overview
 
-Terminal utility package: the Docker build/push layer of the Noizu k8s
-deployment toolchain. Three bash executables read image targets from the merged
+Terminal utility package: the Docker build/push/sandbox layer of the Noizu k8s
+deployment toolchain. Four bash executables read image targets from the merged
 `infra-config.yaml` `project:` section, build with BuildKit/buildx (multi-arch
 capable), and push to `$K8_DOCKER_REGISTRY` with Infisical-resolved patch
 versions. Installed to `~/.local/bin` via `make install` / repo-root
@@ -14,6 +14,7 @@ versions. Installed to `~/.local/bin` via `make install` / repo-root
 
 - `bin/docker-build` — build configured targets (flat or composite `<domain>/<service>`); globs, `--pick`, parallel via zellij panes or background jobs; `--native`/`--multiarch`; optional `--push`/`--release`
 - `bin/docker-push` — Infisical patch-version resolution, retag, push; `--release` bumps helm values tag; `--headless` for agents
+- `bin/docker-sandbox` — live sandbox stacks: kubectl port-forwards + generated compose override against forwarded prod services; `--dry-run`/`up -d`/`logs`/`down`
 - `bin/docker-qemu11` — privileged QEMU 11.x binfmt registration for amd64-on-arm64 (Elixir builds); rerun after Docker VM restarts
 - `Makefile` — `install` copies `bin/*` to `$INSTALL_DIR`; `compile`/`test` no-ops
 - `.docker-state/` — runtime build/push handoff state (`last`, `shadow`, `builds`, `pushes`)
@@ -32,6 +33,7 @@ legacy `docker.repos`/`docker.mappings` only as fallback. Registry/creds from
 - zellij fan-out with background-job fallback; `--no-zellij`/`--headless` agent-safe
 - Build/push split coordinated through `.docker-state/` files
 - QEMU binfmt registration kept as a separate privileged tool
+- Sandbox forwards prod services via port-forward + compose override; never fetches app secrets (app env/init must have run; Bash 4+)
 
 ## Ecosystem Fit
 
