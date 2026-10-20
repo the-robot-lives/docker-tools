@@ -103,6 +103,10 @@ cat <<EOF
     --prod             Set BUILD_ENV=prod
     --env ENV, --env=ENV  Set BUILD_ENV to a custom value
     --vsn VERSION      Explicit version tag (e.g., 3.2.edge, v1.0.edge-stage)
+    --lane LANE        Release lane build (dev|stage|oob): adds the immutable tag
+                       <lane>-<YYYYmmdd>-<sha7> (ADR-025). Requires a clean tracked
+                       tree and refuses a tag that already exists in ECR. prod is
+                       never built — promote a validated digest with docker-promote.
     --no-cache         Build with --no-cache
     --no-zellij        Multi-build without zellij (background jobs + logs)
     --release          Pass --release to docker-push (update helm tag)
@@ -153,6 +157,7 @@ FLAG_VERBOSE=false
 FLAG_NATIVE_ONLY=false
 FLAG_MULTIARCH="${K8_DOCKER_MULTIARCH:-true}"
 EXPLICIT_VSN=""
+BUILD_LANE=""
 EXPLICIT_PLATFORMS=""
 INCLUDE_LIST=""
 TARGET=""
@@ -181,6 +186,8 @@ while [[ $# -gt 0 ]]; do
     --multiarch) FLAG_MULTIARCH=true ;;
     --platform)  EXPLICIT_PLATFORMS="$2"; shift ;;
     --vsn)       EXPLICIT_VSN="$2"; shift ;;
+    --lane)      BUILD_LANE="$2"; shift ;;
+    --lane=*)    BUILD_LANE="${1#--lane=}" ;;
     --publish-chart)    export DOCKER_PUSH_HELM_PUBLISH_MODE=yes ;;
     --no-publish-chart) export DOCKER_PUSH_HELM_PUBLISH_MODE=no ;;
     --config) shift ;;
@@ -329,6 +336,16 @@ if [[ -n "$TARGET" ]] && ($BUILD_ALL || $BUILD_PICK || $BUILD_INCLUDE); then
   die "Cannot specify a target with --all, --pick, or --include"
 fi
 
+# Release lanes (ADR-025): prod is promoted from a validated digest, never built.
+case "$BUILD_LANE" in
+  ""|dev|stage|oob) ;;
+  prod|production) die "--lane prod is not a build lane — promote the validated oob/stage digest with docker-promote" ;;
+  *) die "Unknown --lane '${BUILD_LANE}' (expected dev, stage or oob)" ;;
+esac
+# A lane tag only means something once it is in ECR: lane builds always push
+# (buildx pushes every tag, including the lane tag, in one step).
+[[ -n "$BUILD_LANE" ]] && AUTO_PUSH=true
+
 # =============================================================================
 # _build_single — Core build logic for one image
 # =============================================================================
@@ -400,6 +417,34 @@ _build_single() {
     "${full_image}:${build_vsn}"
   )
 
+  # --- Provenance (ADR-025) ---
+  local git_sha_full git_ref build_ts image_tag release_lane
+  git_sha_full=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+  git_ref=$(git symbolic-ref --short -q HEAD 2>/dev/null || echo "detached")
+  build_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  image_tag="$build_vsn"
+  # Unlaned (laptop/legacy) builds are class "legacy" for the pruner, whatever BUILD_ENV says.
+  release_lane="${BUILD_LANE:-legacy}"
+
+  if [[ -n "$BUILD_LANE" ]]; then
+    if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+      fail "--lane ${BUILD_LANE}: ${repo_dir} has uncommitted tracked changes — commit first so the tag names a real commit"
+      return 1
+    fi
+    local sha7 lane_tag
+    sha7=$(git rev-parse --short=7 HEAD)
+    lane_tag="${BUILD_LANE}-$(date -u +%Y%m%d)-${sha7}"
+    image_tag="$lane_tag"
+    if [[ "$REGISTRY" == *.dkr.ecr.*.amazonaws.com ]] && \
+       aws ecr describe-images --repository-name "$registry_path" --image-ids "imageTag=${lane_tag}" \
+         --region "$(cut -d. -f4 <<<"$REGISTRY")" >/dev/null 2>&1; then
+      fail "Lane tag ${registry_path}:${lane_tag} already exists in ECR — lane tags are immutable"
+      return 1
+    fi
+    tags+=("${full_image}:${lane_tag}")
+    info "Lane           : ${BUILD_LANE} → ${lane_tag}"
+  fi
+
   # --- Resolve Dockerfile ---
   local dockerfile_flag=()
   local custom_df
@@ -434,6 +479,26 @@ _build_single() {
       build_args+=("${yaml_build_args[@]}")
       info "Build args     : ${#yaml_build_args[@]} from project.yaml"
     fi
+  fi
+
+  # Provenance build args + OCI labels (ADR-025). The Dockerfile's buildinfo
+  # stage turns these into /build-info.json; unused args are harmless.
+  local remote_url
+  remote_url=$(git config --get remote.origin.url 2>/dev/null | sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##')
+  build_args+=(
+    --build-arg "GIT_SHA=${git_sha_full}"
+    --build-arg "GIT_REF=${git_ref}"
+    --build-arg "BUILD_TS=${build_ts}"
+    --build-arg "IMAGE_TAG=${image_tag}"
+    --build-arg "RELEASE_LANE=${release_lane}"
+    --label "org.opencontainers.image.revision=${git_sha_full}"
+    --label "org.opencontainers.image.version=${image_tag}"
+    --label "org.opencontainers.image.created=${build_ts}"
+  )
+  [[ -n "$remote_url" ]] && build_args+=(--label "org.opencontainers.image.source=${remote_url}")
+  # gnp-go-api bakes its version into the binary via ARG VERSION (ldflags).
+  if grep -qs '^ARG VERSION' "${dockerfile_flag[1]:-${repo_dir}/Dockerfile}"; then
+    build_args+=(--build-arg "VERSION=${image_tag}")
   fi
 
   # Per-repo build args — override _build_args_for_image in docker-hooks.sh
@@ -794,6 +859,7 @@ $FLAG_NATIVE_ONLY && PANE_FLAGS+=" --native"
 [[ -n "$EXPLICIT_PLATFORMS" ]] && PANE_FLAGS+=" --platform ${EXPLICIT_PLATFORMS}"
 [[ -n "${BUILD_ENV:-}" ]] && PANE_FLAGS+=" --env=${BUILD_ENV}"
 [[ -n "$EXPLICIT_VSN" ]] && PANE_FLAGS+=" --vsn ${EXPLICIT_VSN}"
+[[ -n "$BUILD_LANE" ]] && PANE_FLAGS+=" --lane ${BUILD_LANE}"
 $FLAG_VERBOSE && PANE_FLAGS+=" --verbose"
 [[ "${DOCKER_YES:-}" == "true" ]] && PANE_FLAGS+=" --yes"
 for pt in "${PUSH_PASSTHROUGH[@]+"${PUSH_PASSTHROUGH[@]}"}"; do

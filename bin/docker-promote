@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# =============================================================================
+# docker-promote — promote a validated image digest to prod by adding tags (ADR-025)
+#
+# Prod is never rebuilt. The exact digest validated on oob (or stage) gets the
+# immutable prod tag prod-<YYYYmmdd>-<sha7>, plus an optional semver tag, via
+# ECR put-image with the existing manifest (multi-arch indexes included).
+#
+# Usage:
+#   docker-promote gnp-backend oob-20261020-95ca3c5                  # dry run (default)
+#   docker-promote gnp-backend oob-20261020-95ca3c5 --semver v1.0.69 --apply
+#
+# Refuses to:
+#   - promote anything that is not an oob-* / stage-* lane tag
+#   - overwrite an existing prod-* or semver tag (they are immutable)
+# =============================================================================
+set -euo pipefail
+
+REGION="${AWS_REGION:-us-east-1}"
+APPLY=false
+SEMVER=""
+REPO=""
+SRC_TAG=""
+
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+die() { echo "❌ $*" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply)  APPLY=true ;;
+    --semver) SEMVER="$2"; shift ;;
+    --region) REGION="$2"; shift ;;
+    -h|--help) usage ;;
+    -*) die "Unknown flag $1" ;;
+    *) if [[ -z "$REPO" ]]; then REPO="$1"; elif [[ -z "$SRC_TAG" ]]; then SRC_TAG="$1"; else die "Unexpected argument $1"; fi ;;
+  esac
+  shift
+done
+[[ -n "$REPO" && -n "$SRC_TAG" ]] || usage 1
+
+[[ "$SRC_TAG" =~ ^(oob|stage)-[0-9]{8}-([0-9a-f]{7})$ ]] \
+  || die "Source tag must be an oob-/stage- lane tag (<lane>-<YYYYmmdd>-<sha7>), got '${SRC_TAG}'"
+SHA7="${BASH_REMATCH[2]}"
+[[ -z "$SEMVER" || "$SEMVER" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--semver must look like v1.0.69"
+
+_tag_exists() {
+  aws ecr describe-images --region "$REGION" --repository-name "$REPO" \
+    --image-ids "imageTag=$1" >/dev/null 2>&1
+}
+
+# Resolve the source manifest exactly as stored (index or single manifest).
+read -r DIGEST MEDIA_TYPE < <(aws ecr batch-get-image --region "$REGION" \
+  --repository-name "$REPO" --image-ids "imageTag=${SRC_TAG}" \
+  --accepted-media-types \
+    application/vnd.oci.image.index.v1+json \
+    application/vnd.docker.distribution.manifest.list.v2+json \
+    application/vnd.oci.image.manifest.v1+json \
+    application/vnd.docker.distribution.manifest.v2+json \
+  --query 'images[0].[imageId.imageDigest,imageManifestMediaType]' --output text) \
+  || die "Could not read ${REPO}:${SRC_TAG}"
+[[ "$DIGEST" == sha256:* ]] || die "${REPO}:${SRC_TAG} not found"
+
+PROD_TAG="prod-$(date -u +%Y%m%d)-${SHA7}"
+TARGETS=("$PROD_TAG")
+[[ -n "$SEMVER" ]] && TARGETS+=("$SEMVER")
+
+echo "Repository : ${REPO}"
+echo "Source     : ${SRC_TAG} → ${DIGEST} (${MEDIA_TYPE})"
+echo "New tags   : ${TARGETS[*]}"
+
+for t in "${TARGETS[@]}"; do
+  if _tag_exists "$t"; then die "Tag ${REPO}:${t} already exists — prod and semver tags are immutable"; fi
+done
+
+if ! $APPLY; then
+  echo "Dry run — re-run with --apply to tag."
+  exit 0
+fi
+
+MANIFEST_FILE="$(mktemp)"; trap 'rm -f "$MANIFEST_FILE"' EXIT
+aws ecr batch-get-image --region "$REGION" --repository-name "$REPO" \
+  --image-ids "imageDigest=${DIGEST}" --accepted-media-types "$MEDIA_TYPE" \
+  --query 'images[0].imageManifest' --output text > "$MANIFEST_FILE"
+
+for t in "${TARGETS[@]}"; do
+  got=$(aws ecr put-image --region "$REGION" --repository-name "$REPO" --image-tag "$t" \
+    --image-manifest "file://${MANIFEST_FILE}" --image-manifest-media-type "$MEDIA_TYPE" \
+    --query 'image.imageId.imageDigest' --output text)
+  [[ "$got" == "$DIGEST" ]] || die "Tag ${t} landed on ${got}, expected ${DIGEST}"
+  echo "✓ ${REPO}:${t} → ${DIGEST}"
+done
