@@ -81,11 +81,37 @@ MANIFEST_FILE="$(mktemp)"; trap 'rm -f "$MANIFEST_FILE"' EXIT
 aws ecr batch-get-image --region "$REGION" --repository-name "$REPO" \
   --image-ids "imageDigest=${DIGEST}" --accepted-media-types "$MEDIA_TYPE" \
   --query 'images[0].imageManifest' --output text > "$MANIFEST_FILE"
+# `--output text` appends a trailing newline; ECR hashes received bytes, so an
+# unstripped file re-registers the index under a different digest.
+printf '%s' "$(cat "$MANIFEST_FILE")" > "${MANIFEST_FILE}.tmp" && mv "${MANIFEST_FILE}.tmp" "$MANIFEST_FILE"
+
+# Content fingerprint: sorted "digest@arch" of an index's children (or the
+# single manifest's own config digest). Identical fingerprints = same image,
+# even if ECR re-serializes the index wrapper and changes its digest.
+_content_fp() {
+  aws ecr batch-get-image --region "$REGION" --repository-name "$REPO" \
+    --image-ids "imageTag=$1" --query 'images[0].imageManifest' --output text |
+  python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+ms = d.get("manifests") or []
+if not ms:
+    print(d["config"]["digest"])
+else:
+    print("\n".join(sorted(
+        m["digest"] + "@" + (m.get("platform") or {}).get("architecture", "-")
+        for m in ms)))'
+}
+SRC_FP="$(_content_fp "$SRC_TAG")"
 
 for t in "${TARGETS[@]}"; do
   got=$(aws ecr put-image --region "$REGION" --repository-name "$REPO" --image-tag "$t" \
     --image-manifest "file://${MANIFEST_FILE}" --image-manifest-media-type "$MEDIA_TYPE" \
     --query 'image.imageId.imageDigest' --output text)
-  [[ "$got" == "$DIGEST" ]] || die "Tag ${t} landed on ${got}, expected ${DIGEST}"
-  echo "✓ ${REPO}:${t} → ${DIGEST}"
+  if [[ "$got" != "$DIGEST" ]]; then
+    [[ "$(_content_fp "$t")" == "$SRC_FP" ]] \
+      || die "Tag ${t} content mismatch: children differ from ${SRC_TAG}"
+    echo "  (note: wrapper digest ${got} ≠ source ${DIGEST} — ECR re-serialized; children verified identical)"
+  fi
+  echo "✓ ${REPO}:${t} → ${got}"
 done
