@@ -1,5 +1,7 @@
 # Project Layout
 
+<!-- 〚📁:d10eceaa-1ee4-5a89-bbb7-1dd3d9fab1c1〛 docker-tools layout doc :: Navigable map of the project tree, runtime state, and setup-required files -->
+
 Terminal utility package: Docker image build/push/sandbox helpers for the Noizu
 k8s platform. Scripts read Docker targets from the merged `infra-config.yaml`
 `project:` section and install to `~/.local/bin` via `make install`

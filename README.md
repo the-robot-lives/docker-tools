@@ -1,5 +1,7 @@
 # docker-tools
 
+<!-- 〚📁:3ce107b3-b381-5ae2-b512-632eed2bc281〛 docker-tools :: Docker image build/push/sandbox helpers driven by shared infra-config targets -->
+
 **Repo:** https://github.com/the-robot-lives/docker-tools
 
 Docker image build and push helpers driven by shared config — target aliases, BuildKit/buildx multi-arch, multi-image selection, and local build state.
@@ -27,6 +29,11 @@ make test       # placeholder (no-op)
 
 Also installed by the monorepo root `make install-utilities`. No deployment path here — releases are CI/CD-driven; this is the local/dev build lane.
 
+<!-- 〚🔧:7101e0eb-a760-59a9-9003-10afe9e35d2d〛 docker-build :: Build configured image targets via buildx; aliases, globs, --pick/--all, --native/--multiarch, optional --push -->
+<!-- 〚🔧:78898aa8-39b9-5e59-aa32-8314871a75a5〛 docker-push :: Push built images with Infisical patch versioning; --release bumps the helm values tag -->
+<!-- 〚🔧:d1ebfbee-4c27-552d-ad13-748150c66aa9〛 docker-sandbox :: Run the app's sandbox compose stack against kubectl-forwarded production services -->
+<!-- 〚🔧:4eaf88fa-8cc1-5c75-a7ab-9d29b9e1235a〛 docker-qemu11 :: Register QEMU 11.x binfmt (privileged) for amd64-on-arm64 builds; rerun after Docker VM restarts -->
+
 ## Usage
 
 ```bash
@@ -45,6 +52,8 @@ docker-build --no-cache backend
 docker-push backend                   # push a built image
 docker-sandbox therobotplans.com up -d
 ```
+
+<!-- 〚🔌:93fbfce2-c138-5dd9-af9e-ccd1a7833c75〛 infra-config docker targets contract :: project.docker.images[] / composite projects[].services[] target schema shared with the deploy tooling -->
 
 ## Configuring Targets
 

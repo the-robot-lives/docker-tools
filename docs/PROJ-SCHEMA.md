@@ -1,5 +1,7 @@
 # Project Schema — Config & Data Artifacts
 
+<!-- 〚📁:b224c6bd-18ee-5b7a-bcb9-05547ddf8638〛 docker-tools schema doc :: infra-config target stanzas, environment inputs, and local state file formats -->
+
 > **No persistence layer.** docker-utils is a bash CLI tool package with no
 > database, no SQL schema, and no Liquibase changelogs. This document therefore
 > covers the persistence/config artifacts it *does* have: the `infra-config.yaml`
