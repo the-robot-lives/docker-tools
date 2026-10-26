@@ -1,5 +1,7 @@
 # Project Architecture
 
+<!-- 〚📁:42c3141e-1541-5fb4-b74c-ea6178a6b615〛 docker-tools architecture doc :: System overview, components, configuration flow, and key decisions -->
+
 ## Overview
 
 `docker-utils` is a terminal utility package providing the Docker image

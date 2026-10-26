@@ -1,0 +1,122 @@
+---
+pointers:
+  3ce107b3-b381-5ae2-b512-632eed2bc281:
+    created_at: 2026-10-26T21:50:38.262716Z
+    description: Docker image build/push/sandbox helpers driven by shared infra-config targets
+    file_path: README.md
+    function: docker-tools
+    kind: file
+    line: 3
+    locations:
+      - file_path: README.md
+        line: 3
+    token: 𔄈𔘢𔆢𔒱
+    updated_at: 2026-10-26T21:50:38.262716Z
+  42c3141e-1541-5fb4-b74c-ea6178a6b615:
+    created_at: 2026-10-26T21:50:38.262723Z
+    description: System overview, components, configuration flow, and key decisions
+    file_path: docs/PROJ-ARCH.md
+    function: docker-tools architecture doc
+    kind: file
+    line: 3
+    locations:
+      - file_path: docs/PROJ-ARCH.md
+        line: 3
+    token: 𔒔𓗜𓹒𓄕
+    updated_at: 2026-10-26T21:50:38.262723Z
+  4eaf88fa-8cc1-5c75-a7ab-9d29b9e1235a:
+    created_at: 2026-10-26T21:50:38.262696Z
+    description: Register QEMU 11.x binfmt (privileged) for amd64-on-arm64 builds; rerun after Docker VM restarts
+    file_path: README.md
+    function: docker-qemu11
+    kind: function
+    line: 35
+    locations:
+      - file_path: README.md
+        line: 35
+    token: 𓨁𓯌𓃹𔙺
+    updated_at: 2026-10-26T21:50:38.262696Z
+  7101e0eb-a760-59a9-9003-10afe9e35d2d:
+    created_at: 2026-10-26T21:50:38.262692Z
+    description: Build configured image targets via buildx; aliases, globs, --pick/--all, --native/--multiarch, optional --push
+    file_path: README.md
+    function: docker-build
+    kind: function
+    line: 32
+    locations:
+      - file_path: README.md
+        line: 32
+    token: 𓞐𓋈𓲠𔘽
+    updated_at: 2026-10-26T21:50:38.262692Z
+  78898aa8-39b9-5e59-aa32-8314871a75a5:
+    created_at: 2026-10-26T21:50:38.262688Z
+    description: Push built images with Infisical patch versioning; --release bumps the helm values tag
+    file_path: README.md
+    function: docker-push
+    kind: function
+    line: 33
+    locations:
+      - file_path: README.md
+        line: 33
+    token: 𓛛𓫃𓃖𔌕
+    updated_at: 2026-10-26T21:50:38.262688Z
+  93fbfce2-c138-5dd9-af9e-ccd1a7833c75:
+    created_at: 2026-10-26T21:50:38.262712Z
+    description: project.docker.images[] / composite projects[].services[] target schema shared with the deploy tooling
+    file_path: README.md
+    function: infra-config docker targets contract
+    kind: interface
+    line: 56
+    locations:
+      - file_path: README.md
+        line: 56
+    token: 𔄅𓬜𓋥𓀥
+    updated_at: 2026-10-26T21:50:38.262712Z
+  b224c6bd-18ee-5b7a-bcb9-05547ddf8638:
+    created_at: 2026-10-26T21:50:38.262719Z
+    description: infra-config target stanzas, environment inputs, and local state file formats
+    file_path: docs/PROJ-SCHEMA.md
+    function: docker-tools schema doc
+    kind: file
+    line: 3
+    locations:
+      - file_path: docs/PROJ-SCHEMA.md
+        line: 3
+    token: 𔄥𓳦𔉟𔎸
+    updated_at: 2026-10-26T21:50:38.262719Z
+  d10eceaa-1ee4-5a89-bbb7-1dd3d9fab1c1:
+    created_at: 2026-10-26T21:50:38.262705Z
+    description: Navigable map of the project tree, runtime state, and setup-required files
+    file_path: docs/PROJ-LAYOUT.md
+    function: docker-tools layout doc
+    kind: file
+    line: 3
+    locations:
+      - file_path: docs/PROJ-LAYOUT.md
+        line: 3
+    token: 𓾆𓉡𓣂𓛱
+    updated_at: 2026-10-26T21:50:38.262705Z
+  d1ebfbee-4c27-552d-ad13-748150c66aa9:
+    created_at: 2026-10-26T21:50:38.262709Z
+    description: Run the app's sandbox compose stack against kubectl-forwarded production services
+    file_path: README.md
+    function: docker-sandbox
+    kind: function
+    line: 34
+    locations:
+      - file_path: README.md
+        line: 34
+    token: 𔂈𓞓𓔃𓭩
+    updated_at: 2026-10-26T21:50:38.262709Z
+  d446da59-4a3a-51b1-acc5-6543cf15b696:
+    created_at: 2026-10-26T21:50:38.262672Z
+    description: Agent guidance — monorepo rules, worktree convention, branch/PR policy
+    file_path: CLAUDE.md
+    function: docker-tools agent instructions
+    kind: file
+    line: 3
+    locations:
+      - file_path: CLAUDE.md
+        line: 3
+    token: 𓋨𓃵𓯞𔎆
+    updated_at: 2026-10-26T21:50:38.262672Z

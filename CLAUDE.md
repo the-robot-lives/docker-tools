@@ -1,5 +1,7 @@
 # CLAUDE.md — docker-utils
 
+<!-- 〚📁:d446da59-4a3a-51b1-acc5-6543cf15b696〛 docker-tools agent instructions :: Agent guidance — monorepo rules, worktree convention, branch/PR policy -->
+
 Docker image build/push tooling (docker-build, docker-push, docker-qemu11, docker-sandbox) driven by trl-infra .infra-config.yaml build targets; shares the vendored k8-lib shell library with the other k8/deploy packages. Local dev only — production releases are git-driven (GHA + ArgoCD), never docker-push to ship.
 
 
