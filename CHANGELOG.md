@@ -3,6 +3,9 @@
 ## [Unreleased]
 - Added PROJ-ARCH.md / PROJ-ARCH.summary.md / PROJ-LAYOUT.md / PROJ-LAYOUT.summary.md under `docs/` (NPL doc scaffolding, no behavior change)
 
+## 2026-10-26
+- docs: correct stale "main is CI/CD-only" deploy note — merging into main triggers CI/CD (user-verified 2026-10-26)
+
 ## [m3-zellij-panes] — 2026-07-08 — tag: `utilities-k8-docker-utils/m3-zellij-panes`
 Milestone summary: `docker-build`'s multi-target zellij mode learned to reuse the caller's existing zellij tab instead of always spawning a new session, and the pane shell became configurable/auto-detected instead of hardcoded to bash.
 
