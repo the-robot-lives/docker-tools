@@ -24,11 +24,16 @@ docker-utils/
 │   ├── PROJ-LAYOUT.md          #   This file
 │   ├── PROJ-LAYOUT.summary.md  #   Tree-only companion for tools/agents
 │   ├── PROJ-ARCH.md            #   Architecture overview (+ .summary.md)
+│   ├── PROJ-SCHEMA.md          #   Config/state data artifacts (+ .summary.md)
+│   ├── THREAT-MODEL.md         #   Attack surface, trust boundaries, vuln register (+ .summary.md)
 │   ├── PROJ-HOWTO.md           #   Task howtos (+ .summary.md)
 │   ├── PROJ-FAQ.md             #   FAQ (+ .summary.md)
 │   └── howto/                  #   Focused runbooks (Infisical failures, headless push, helm tag bump, zellij panes)
-├── .gitignore                  # Ignores .DS_Store, swap files, .env, .envrc.local
-├── CHANGELOG.md                # Release notes
+├── .gitignore                  # Ignores .DS_Store, swap files, .env, .envrc.local, .claude/worktrees/
+├── AGENT.md                    # Agent guidance for Codex/Grok/Cursor (restyle of AGENTS.md)
+├── AGENTS.md                   # Agent guidance, numbered-MUST form (wins over parent AGENTS.md on conflict)
+├── CHANGELOG.md                # Work log
+├── CLAUDE.md                   # Claude Code agent guidance (monorepo rules + worktree convention)
 ├── Makefile                    # `make install` → copies bin/* to $INSTALL_DIR (default ~/.local/bin) + completions; compile/test are no-ops
 ├── README.md                   # Start here — install, prerequisites, config sources, target schema
 └── merge-notes.md              # Notes from monorepo-side consolidation sweep

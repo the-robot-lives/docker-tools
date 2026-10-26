@@ -8,9 +8,12 @@ docker-utils/
 │   ├── docker-sandbox          #   Sandbox against forwarded prod services
 │   └── docker-qemu11           #   Register QEMU 11.x binfmt (amd64 on arm)
 ├── completions/                # bash + zsh completions (docker-build, docker-push)
-├── docs/                       # PROJ-* docs + howto/ runbooks
-├── .gitignore                  # .DS_Store, swap files, .env, .envrc.local
+├── docs/                       # PROJ-* / THREAT-MODEL docs + howto/ runbooks
+├── .gitignore                  # .DS_Store, swap files, .env, .envrc.local, .claude/worktrees/
+├── AGENT.md                    # Agent guidance (Codex/Grok/Cursor)
+├── AGENTS.md                   # Agent guidance (numbered-MUST form)
 ├── CHANGELOG.md
+├── CLAUDE.md                   # Claude Code agent guidance
 ├── Makefile                    # make install → ~/.local/bin + completions
 ├── README.md                   # Install, config sources, target schema
 └── merge-notes.md
