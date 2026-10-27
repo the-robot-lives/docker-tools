@@ -1,5 +1,8 @@
 # Changelog — utilities/k8/docker-utils
 
+## 2026-10-28
+- docs: add AGENT-README.md (agent orientation)
+
 ## [Unreleased]
 - Added PROJ-ARCH.md / PROJ-ARCH.summary.md / PROJ-LAYOUT.md / PROJ-LAYOUT.summary.md under `docs/` (NPL doc scaffolding, no behavior change)
 
